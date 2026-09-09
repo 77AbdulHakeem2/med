@@ -161,8 +161,20 @@ export const ChannelFeed: React.FC<ChannelFeedProps> = ({ posts, channelSetting 
                     {/* Caption */}
                     {post.caption && (
                       <div className="text-xs text-[#ccc] whitespace-pre-wrap leading-relaxed bg-[#141414] p-3 rounded border border-[#222]">
-                        <span className="text-[10px] font-mono text-[#666] uppercase block mb-1">CAPTION_SANITIZED:</span>
-                        {post.caption}
+                        <div className="flex items-center justify-between text-[10px] font-mono text-[#666] uppercase mb-1">
+                          <span>CAPTION_SANITIZED:</span>
+                          {post.caption.includes('MedPulse') && (
+                            <span className="text-sky-400 font-sans font-semibold">قالب MedPulse المعتمد 🫀</span>
+                          )}
+                        </div>
+                        {post.caption.includes('<a') ? (
+                          <div
+                            className="[&_a]:text-sky-400 [&_a]:underline [&_a]:font-semibold hover:[&_a]:text-sky-300"
+                            dangerouslySetInnerHTML={{ __html: post.caption }}
+                          />
+                        ) : (
+                          <div>{post.caption}</div>
+                        )}
                       </div>
                     )}
                   </div>

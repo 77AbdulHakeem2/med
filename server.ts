@@ -6,6 +6,7 @@ import { store } from './server/store';
 import { TelegramService } from './server/telegram';
 import { queueWorker } from './server/queueWorker';
 import { FileProcessor } from './server/fileProcessor';
+import { batchAnalyzeAndRenameWithAI, InputBatchItem } from './server/aiRenamer';
 import { SystemStatus } from './src/types';
 
 const PORT = 3000;
@@ -99,31 +100,52 @@ async function startServer() {
       registeredUsersCount: store.getAllUsers().length,
       lastActiveTime: Date.now(),
       resumableTransfersCount: queue.filter((q) => q.chunkProgress?.resumeToken).length,
+      aiRenaming: config.aiRenaming,
     };
 
     res.json(status);
   });
 
-  // Bot Config: save token & toggle polling
+  // Bot Config: get current configuration
+  app.get('/api/bot/config', (req, res) => {
+    const config = store.getConfig();
+    res.json({
+      botToken: config.botToken,
+      pollingActive: config.pollingActive,
+      webhookUrl: config.webhookUrl,
+      aiRenaming: config.aiRenaming,
+      isConfigured: !!config.botToken,
+    });
+  });
+
+  // Bot Config: save token, AI preferences & toggle polling
   app.post('/api/bot/config', async (req, res) => {
-    const { botToken, pollingActive, webhookUrl } = req.body;
+    const { botToken, pollingActive, webhookUrl, aiRenaming } = req.body;
     const current = store.getConfig();
 
     const update: any = {};
-    if (botToken !== undefined) update.botToken = botToken.trim();
+    if (botToken !== undefined) {
+      update.botToken = botToken.trim();
+      // Auto-activate polling if a valid token is provided and pollingActive wasn't explicitly disabled
+      if (update.botToken && pollingActive === undefined && !current.pollingActive) {
+        update.pollingActive = true;
+      }
+    }
     if (pollingActive !== undefined) update.pollingActive = !!pollingActive;
     if (webhookUrl !== undefined) update.webhookUrl = webhookUrl.trim();
+    if (aiRenaming !== undefined) update.aiRenaming = aiRenaming;
 
     store.updateConfig(update);
+    const updatedConfig = store.getConfig();
 
-    // Test new token if provided
+    // Test token if provided or existing
     let verified = false;
     let botUser = null;
     let errorDesc = '';
 
-    if (update.botToken || current.botToken) {
-      const token = update.botToken || current.botToken;
-      const meRes = await TelegramService.getMe(token);
+    const tokenToTest = updatedConfig.botToken;
+    if (tokenToTest) {
+      const meRes = await TelegramService.getMe(tokenToTest);
       if (meRes.ok && meRes.result) {
         verified = true;
         botUser = meRes.result;
@@ -134,11 +156,73 @@ async function startServer() {
 
     res.json({
       success: true,
-      config: store.getConfig(),
+      config: updatedConfig,
       verified,
       botUser,
       error: errorDesc,
     });
+  });
+
+  // AI Batch Renaming Preview Endpoint
+  app.post('/api/ai/batch-rename', async (req, res) => {
+    try {
+      const { items, namingPattern, customInstructions } = req.body;
+      const currentConfig = store.getConfig().aiRenaming;
+      const activeConfig = {
+        ...currentConfig,
+        ...(namingPattern ? { namingPattern } : {}),
+        ...(customInstructions !== undefined ? { customInstructions } : {}),
+      };
+
+      const inputItems: InputBatchItem[] = (items && items.length > 0)
+        ? items
+        : store.getQueue().map((q) => ({
+            id: q.id,
+            originalFilename: q.originalFilename || 'video.mp4',
+            originalCaption: q.originalCaption || '',
+            duration: q.duration,
+            sequenceNumber: q.sequenceNumber,
+            mimeType: q.mimeType,
+            fileSize: q.fileSize,
+          }));
+
+      const results = await batchAnalyzeAndRenameWithAI(inputItems, activeConfig);
+      res.json({
+        success: true,
+        results,
+        config: activeConfig,
+      });
+    } catch (err: any) {
+      console.error('AI batch rename error:', err);
+      res.status(500).json({ success: false, error: err.message || 'فشل التحليل بالذكاء الاصطناعي' });
+    }
+  });
+
+  // Apply AI Batch Renaming Directly to Queue
+  app.post('/api/ai/apply-queue', async (req, res) => {
+    try {
+      const { renames } = req.body;
+      if (!Array.isArray(renames) || renames.length === 0) {
+        return res.status(400).json({ error: 'لم يتم تزويد تعديلات لتطبيقها' });
+      }
+
+      for (const item of renames) {
+        store.updateQueueItem(item.id, {
+          processedFilename: item.formattedFilename,
+          processedCaption: item.formattedCaption,
+          isAiRenamed: true,
+          aiGroupingReason: item.groupingReason,
+        });
+      }
+
+      res.json({
+        success: true,
+        queue: store.getQueue(),
+      });
+    } catch (err: any) {
+      console.error('Error applying AI renames to queue:', err);
+      res.status(500).json({ success: false, error: err.message });
+    }
   });
 
   // Users
@@ -157,18 +241,27 @@ async function startServer() {
   });
 
   // Upload Thumbnail for User
-  app.post('/api/users/:userId/thumbnail', upload.single('thumbnail'), async (req, res) => {
+  app.post('/api/users/:userId/thumbnail', upload.any(), async (req, res) => {
     const userId = req.params.userId;
     let inputSource: Buffer | string | null = null;
 
-    if (req.file) {
+    const files = req.files as Express.Multer.File[] | undefined;
+    if (files && files.length > 0) {
+      inputSource = files[0].buffer;
+    } else if (req.file) {
       inputSource = req.file.buffer;
     } else if (req.body.url) {
       inputSource = req.body.url;
+    } else if (req.body.thumbnail) {
+      inputSource = req.body.thumbnail;
+    } else if (req.body.thumb) {
+      inputSource = req.body.thumb;
+    } else if (req.body.image) {
+      inputSource = req.body.image;
     }
 
     if (!inputSource) {
-      return res.status(400).json({ error: 'No image file or URL provided' });
+      return res.status(400).json({ error: 'لم يتم تزويد صورة مصغرة صالحة (ملف أو رابط أو Base64)' });
     }
 
     try {
@@ -180,15 +273,18 @@ async function startServer() {
         thumbnail: {
           id: `thumb_${Date.now()}`,
           url: finalUrl,
+          dataUrl: std?.dataUrl,
+          standard320Path: std?.standard320Path,
           updatedAt: Date.now(),
         },
+        pendingAction: undefined,
       });
 
       res.json({
         success: true,
         message: 'تم تعيين واعتماد الصورة المصغرة بنجاح وفق معايير تليجرام المعتمدة',
         user: updated,
-        standardized: std ? { width: std.width, height: std.height, sizeBytes: std.sizeBytes } : null,
+        standardized: std ? { width: std.width, height: std.height, sizeBytes: std.sizeBytes, path: std.standard320Path } : null,
       });
     } catch (err: any) {
       console.error('Thumbnail upload processing error:', err);

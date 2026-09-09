@@ -1,6 +1,6 @@
 {
   "name": "Telegram Auto-Publisher & Media Pipeline",
-  "description": "Telegram bot and processing pipeline for queuing, chunked processing, custom thumbnails, filename sanitization, and sequential channel publishing.",
+  "description": "Telegram bot and processing pipeline with persistent bot token, AI-powered batch video renaming, FIFO queue, and sequential channel publishing.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

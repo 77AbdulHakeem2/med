@@ -5,6 +5,7 @@ import { promisify } from 'util';
 import { TelegramService } from './telegram';
 import { splitExtension } from './pipeline';
 import { UserSetting } from '../src/types';
+import { telegramMtproto } from './telegramMtproto';
 
 const execAsync = promisify(exec);
 
@@ -135,6 +136,16 @@ export class FileProcessor {
     const standard320Path = path.join(THUMBS_DIR, `user_${user.userId}_thumb_320.jpg`);
     const masterPath = path.join(THUMBS_DIR, `user_${user.userId}_thumb_master.jpg`);
 
+    // Check if thumbnail standard path already exists
+    if (thumbSetting.standard320Path && fs.existsSync(thumbSetting.standard320Path) && fs.statSync(thumbSetting.standard320Path).size > 0) {
+      const buf = fs.readFileSync(thumbSetting.standard320Path);
+      return {
+        standard320Path: thumbSetting.standard320Path,
+        masterPath: fs.existsSync(masterPath) ? masterPath : thumbSetting.standard320Path,
+        dataUrl: thumbSetting.dataUrl || `data:image/jpeg;base64,${buf.toString('base64')}`,
+      };
+    }
+
     // If both standardized files already exist on disk and are valid
     if (
       fs.existsSync(standard320Path) &&
@@ -152,8 +163,9 @@ export class FileProcessor {
 
     try {
       // 1. If base64 data URL
-      if (thumbSetting.url && thumbSetting.url.startsWith('data:image/')) {
-        const std = await this.standardizeThumbnail(thumbSetting.url, user.userId);
+      const dataUrlCandidate = thumbSetting.dataUrl || (thumbSetting.url?.startsWith('data:image/') ? thumbSetting.url : null);
+      if (dataUrlCandidate) {
+        const std = await this.standardizeThumbnail(dataUrlCandidate, user.userId);
         if (std) return { standard320Path: std.standard320Path, masterPath: std.masterPath, dataUrl: std.dataUrl };
       }
 
@@ -202,7 +214,9 @@ export class FileProcessor {
     token: string | undefined,
     fileId: string | undefined,
     originalFilename: string,
-    onProgress?: (pct: number) => Promise<void>
+    onProgress?: (pct: number) => Promise<void>,
+    chatId?: string,
+    messageId?: number
   ): Promise<{ localPath: string; isDownloaded: boolean; error?: string }> {
     ensureDirectories();
     const { ext } = splitExtension(originalFilename);
@@ -222,12 +236,20 @@ export class FileProcessor {
             if (onProgress) await onProgress(100);
             return { localPath: localDownloadPath, isDownloaded: true };
           }
-        } else if (fileInfo.description?.includes('too big')) {
-          return {
-            localPath: '',
-            isDownloaded: false,
-            error: 'حجم الملف يتجاوز حد تنزيل البوتات السحابية (20MB). سيتم تطبيق الصورة المصغرة وإعادة التسمية عبر المعالجة المباشرة لنظام تليجرام.',
-          };
+        } else if ((fileInfo.description?.includes('too big') || !fileInfo.ok) && chatId && messageId) {
+          // File exceeds 20MB Bot API limit: download via MTProto to allow embedding custom thumbnail!
+          console.log(`File exceeds 20MB or getFile failed. Downloading via MTProto (Chat: ${chatId}, Msg: ${messageId})...`);
+          const mtprotoRes = await telegramMtproto.downloadMediaFromMessage(
+            token,
+            chatId,
+            messageId,
+            localDownloadPath,
+            onProgress
+          );
+          if (mtprotoRes.success) {
+            return { localPath: localDownloadPath, isDownloaded: true };
+          }
+          console.warn('MTProto download fallback failed:', mtprotoRes.error);
         }
       } catch (err: any) {
         console.warn('Error downloading file from Telegram:', err);
@@ -308,7 +330,7 @@ export class FileProcessor {
     duration?: number,
     width?: number,
     height?: number
-  ): Promise<{ ok: boolean; description?: string; result?: any }> {
+  ): Promise<{ ok: boolean; description?: string; result?: any; wasPhysicalUpload: boolean }> {
     const formData = new FormData();
     formData.append('chat_id', targetChannel);
     if (processedCaption) {
@@ -316,18 +338,42 @@ export class FileProcessor {
       formData.append('parse_mode', 'HTML');
     }
 
-    // Attach custom thumbnail file if present
+    // Attach custom thumbnail buffer ensuring standard Telegram specs: 320x320 JPEG, < 200KB
     if (thumbPath && fs.existsSync(thumbPath)) {
       const thumbBuf = fs.readFileSync(thumbPath);
-      const thumbFile = new File([thumbBuf], 'thumbnail.jpg', { type: 'image/jpeg' });
-      formData.append('thumbnail', thumbFile, 'thumbnail.jpg');
-      formData.append('thumb', thumbFile, 'thumbnail.jpg');
+      const thumbBlob = new Blob([thumbBuf], { type: 'image/jpeg' });
+      formData.append('thumb', thumbBlob, 'thumb.jpg');
+      formData.append('thumbnail', thumbBlob, 'thumb.jpg');
+      formData.append('thumb_file', thumbBlob, 'thumb.jpg');
     }
 
     // 1. If physical processed file exists on disk, upload actual file with new name!
     if (localProcessedPath && fs.existsSync(localProcessedPath)) {
+      const stat = fs.statSync(localProcessedPath);
+      const fileSize = stat.size;
+
+      // If file is > 48MB, bypass Telegram Bot API HTTP 50MB upload limit using MTProto
+      if (fileSize > 48 * 1024 * 1024) {
+        console.log(`File size (${(fileSize / (1024 * 1024)).toFixed(1)}MB) exceeds 48MB. Uploading via MTProto direct connection...`);
+        const mtprotoUpload = await telegramMtproto.uploadMediaFile(
+          token,
+          targetChannel,
+          localProcessedPath,
+          thumbPath,
+          processedCaption,
+          isVideo,
+          duration,
+          width,
+          height
+        );
+        if (mtprotoUpload.ok) {
+          return { ok: true, result: mtprotoUpload.result, wasPhysicalUpload: true };
+        }
+        console.warn('MTProto upload failed, attempting HTTP multipart fallback:', mtprotoUpload.description);
+      }
+
       const fileBuf = fs.readFileSync(localProcessedPath);
-      const fileBlob = new File([fileBuf], processedFilename, {
+      const fileBlob = new Blob([fileBuf], {
         type: isVideo ? 'video/mp4' : 'application/octet-stream',
       });
 
@@ -339,10 +385,27 @@ export class FileProcessor {
         if (height) formData.append('height', String(height));
 
         const res = await TelegramService.callApiMultipart(token, 'sendVideo', formData);
-        if (res.ok) return res;
+        if (res.ok) return { ...res, wasPhysicalUpload: true };
+
+        console.warn('sendVideo multipart failed, trying MTProto or sendDocument:', res.description);
+
+        // Try MTProto upload if HTTP failed due to size or timeout
+        const mtprotoRetry = await telegramMtproto.uploadMediaFile(
+          token,
+          targetChannel,
+          localProcessedPath,
+          thumbPath,
+          processedCaption,
+          isVideo,
+          duration,
+          width,
+          height
+        );
+        if (mtprotoRetry.ok) {
+          return { ok: true, result: mtprotoRetry.result, wasPhysicalUpload: true };
+        }
 
         // Fallback to sendDocument if video format was rejected
-        console.warn('sendVideo multipart failed, trying sendDocument:', res.description);
         const docFormData = new FormData();
         docFormData.append('chat_id', targetChannel);
         if (processedCaption) {
@@ -351,17 +414,21 @@ export class FileProcessor {
         }
         if (thumbPath && fs.existsSync(thumbPath)) {
           const thumbBuf = fs.readFileSync(thumbPath);
-          docFormData.append('thumbnail', new File([thumbBuf], 'thumbnail.jpg', { type: 'image/jpeg' }), 'thumbnail.jpg');
+          const thumbBlob = new Blob([thumbBuf], { type: 'image/jpeg' });
+          docFormData.append('thumb', thumbBlob, 'thumb.jpg');
+          docFormData.append('thumbnail', thumbBlob, 'thumb.jpg');
         }
         docFormData.append('document', fileBlob, processedFilename);
-        return TelegramService.callApiMultipart(token, 'sendDocument', docFormData);
+        const docRes = await TelegramService.callApiMultipart(token, 'sendDocument', docFormData);
+        return { ...docRes, wasPhysicalUpload: docRes.ok };
       } else {
         formData.append('document', fileBlob, processedFilename);
-        return TelegramService.callApiMultipart(token, 'sendDocument', formData);
+        const res = await TelegramService.callApiMultipart(token, 'sendDocument', formData);
+        return { ...res, wasPhysicalUpload: res.ok };
       }
     }
 
-    // 2. If file was not downloaded locally (exceeds 20MB cloud limit), send via Telegram fileId with multipart thumbnail
+    // 2. If file was not downloaded locally (exceeds cloud limit and MTProto unavailable), send via Telegram fileId
     if (fallbackFileId) {
       if (isVideo) {
         formData.append('video', fallbackFileId);
@@ -369,14 +436,16 @@ export class FileProcessor {
         if (duration) formData.append('duration', String(duration));
         if (width) formData.append('width', String(width));
         if (height) formData.append('height', String(height));
-        return TelegramService.callApiMultipart(token, 'sendVideo', formData);
+        const res = await TelegramService.callApiMultipart(token, 'sendVideo', formData);
+        return { ...res, wasPhysicalUpload: false };
       } else {
         formData.append('document', fallbackFileId);
-        return TelegramService.callApiMultipart(token, 'sendDocument', formData);
+        const res = await TelegramService.callApiMultipart(token, 'sendDocument', formData);
+        return { ...res, wasPhysicalUpload: false };
       }
     }
 
-    return { ok: false, description: 'لم يتم العثور على ملف معالج أو معرّف تيليجرام صالح للإرسال' };
+    return { ok: false, description: 'لم يتم العثور على ملف معالج أو معرّف تيليجرام صالح للإرسال', wasPhysicalUpload: false };
   }
 
   /**

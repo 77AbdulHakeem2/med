@@ -4,14 +4,10 @@ import {
   UserSetting,
   QueueItem,
   ChannelPost,
-  SimulatedTelegramMessage
+  SimulatedTelegramMessage,
+  BotConfig,
+  AIRenamingConfig
 } from '../src/types';
-
-export interface BotConfig {
-  botToken: string;
-  pollingActive: boolean;
-  webhookUrl: string;
-}
 
 interface StoredData {
   config: BotConfig;
@@ -31,6 +27,14 @@ class Store {
       botToken: process.env.TELEGRAM_BOT_TOKEN || '',
       pollingActive: false,
       webhookUrl: '',
+      aiRenaming: {
+        enabled: true,
+        namingPattern: '{subject} - د. {doctor} - {topic} [Part {part}]',
+        customInstructions: '',
+        autoApplyOnQueue: true,
+        captionStyle: 'medpulse_box',
+        customCaptionTemplate: '',
+      },
     },
     users: {},
     queue: [],
@@ -51,15 +55,24 @@ class Store {
       if (fs.existsSync(DATA_FILE)) {
         const raw = fs.readFileSync(DATA_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
+        const resolvedToken = process.env.TELEGRAM_BOT_TOKEN || parsed.config?.botToken || '';
         this.data = {
           ...this.data,
           ...parsed,
           config: {
             ...this.data.config,
             ...(parsed.config || {}),
-            botToken: process.env.TELEGRAM_BOT_TOKEN || parsed.config?.botToken || '',
+            botToken: resolvedToken,
+            pollingActive: parsed.config?.pollingActive ?? (resolvedToken.length > 0),
+            aiRenaming: {
+              ...this.data.config.aiRenaming,
+              ...(parsed.config?.aiRenaming || {}),
+            },
           },
         };
+        if (resolvedToken && !process.env.TELEGRAM_BOT_TOKEN) {
+          process.env.TELEGRAM_BOT_TOKEN = resolvedToken;
+        }
       } else {
         this.seedDefaultData();
         this.save();
@@ -290,8 +303,38 @@ class Store {
     return this.data.config;
   }
 
-  public updateConfig(config: Partial<BotConfig>): BotConfig {
-    Object.assign(this.data.config, config);
+  public updateConfig(configUpdate: Partial<BotConfig>): BotConfig {
+    if (configUpdate.aiRenaming) {
+      this.data.config.aiRenaming = {
+        ...this.data.config.aiRenaming,
+        ...configUpdate.aiRenaming,
+      };
+      const { aiRenaming, ...rest } = configUpdate;
+      Object.assign(this.data.config, rest);
+    } else {
+      Object.assign(this.data.config, configUpdate);
+    }
+
+    // Save token into runtime process environment & persist to .env file
+    if (this.data.config.botToken) {
+      process.env.TELEGRAM_BOT_TOKEN = this.data.config.botToken;
+      try {
+        const envPath = path.resolve(process.cwd(), '.env');
+        let envContent = '';
+        if (fs.existsSync(envPath)) {
+          envContent = fs.readFileSync(envPath, 'utf-8');
+        }
+        if (envContent.includes('TELEGRAM_BOT_TOKEN=')) {
+          envContent = envContent.replace(/TELEGRAM_BOT_TOKEN=.*/g, `TELEGRAM_BOT_TOKEN="${this.data.config.botToken}"`);
+        } else {
+          envContent += `\nTELEGRAM_BOT_TOKEN="${this.data.config.botToken}"\n`;
+        }
+        fs.writeFileSync(envPath, envContent.trim() + '\n', 'utf-8');
+      } catch (err) {
+        console.error('Failed to write .env file', err);
+      }
+    }
+
     this.save();
     return this.data.config;
   }

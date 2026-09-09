@@ -3,9 +3,11 @@ import { TelegramService } from './telegram';
 import {
   processActualFilename,
   processActualCaption,
+  removeForbiddenWords,
   ChunkedTransferManager,
 } from './pipeline';
 import { FileProcessor } from './fileProcessor';
+import { batchAnalyzeAndRenameWithAI } from './aiRenamer';
 import { QueueItem, ChannelPost } from '../src/types';
 
 class QueueWorker {
@@ -212,7 +214,9 @@ class QueueWorker {
             `⬇️ <b>تحميل الملف (${pct}%)</b>\n\n• الملف: <code>${originalName}</code>\n• جاري استلام الحزم وتأمين البيانات...`
           );
         }
-      }
+      },
+      item.chatId,
+      item.messageId
     );
 
     // Stage 3: 🛠️ معالجة الملف
@@ -249,20 +253,72 @@ class QueueWorker {
     );
     await new Promise((r) => setTimeout(r, 70));
 
-    // Stage 5: ✏️ تغيير اسم الملف (Actual Filename Renaming & Forbidden Words Filter)
-    const processedFilename = processActualFilename(originalName, user);
+    // Stage 5: ✏️ تغيير اسم الملف (AI Renaming or Pattern Engine + Forbidden Words Filter)
+    let processedFilename = item.processedFilename;
+    let itemProcessedCaption = item.processedCaption;
+    let isAiRenamed = !!item.isAiRenamed;
+    let aiReason = item.aiGroupingReason || '';
+
+    const botConfig = store.getConfig();
+    if (botConfig.aiRenaming.enabled) {
+      if (!processedFilename || !itemProcessedCaption) {
+        try {
+          // Collect pending items in queue for this user to analyze as a batch
+          const batchPending = store.getQueue().filter(
+            (q) => q.userId === user.userId && (q.status === 'queued' || q.status === 'processing' || q.id === item.id)
+          );
+          const aiResults = await batchAnalyzeAndRenameWithAI(
+            batchPending.map((q) => ({
+              id: q.id,
+              originalFilename: q.originalFilename || 'video.mp4',
+              originalCaption: q.originalCaption,
+              duration: q.duration,
+              sequenceNumber: q.sequenceNumber,
+              mimeType: q.mimeType,
+              fileSize: q.fileSize,
+            })),
+            botConfig.aiRenaming
+          );
+
+          for (const res of aiResults) {
+            store.updateQueueItem(res.id, {
+              processedFilename: res.formattedFilename,
+              processedCaption: res.formattedCaption,
+              isAiRenamed: true,
+              aiGroupingReason: res.groupingReason,
+            });
+            if (res.id === item.id) {
+              processedFilename = res.formattedFilename;
+              itemProcessedCaption = res.formattedCaption;
+              isAiRenamed = true;
+              aiReason = res.groupingReason || '';
+            }
+          }
+        } catch (aiErr) {
+          console.warn('Queue worker AI batch rename error:', aiErr);
+        }
+      }
+    }
+
+    if (!processedFilename) {
+      processedFilename = processActualFilename(originalName, user);
+    }
+
     store.updateQueueItem(item.id, {
       status: 'renaming',
       statusMessage: `✏️ تغيير اسم الملف إلى: ${processedFilename}`,
       processedFilename,
+      isAiRenamed,
+      aiGroupingReason: aiReason,
     });
     await this.updateChatStatus(
       token,
       chatId,
       msgId,
-      `✏️ <b>تغيير اسم الملف</b>\n\n` +
+      `✏️ <b>تغيير اسم الملف ${isAiRenamed ? '(ذكاء اصطناعي موحد 🤖)' : ''}</b>\n\n` +
       `• الاسم الأصلي: <code>${originalName}</code>\n` +
       `• اسم الملف الحقيقي الجديد: <code>${processedFilename}</code>\n` +
+      (aiReason ? `• استنتاج الذكاء الاصطناعي: <i>${aiReason}</i>\n` : '') +
       `• فلترة الكلمات المحظورة: تم التحقق والحذف بنجاح ✅`
     );
 
@@ -274,18 +330,25 @@ class QueueWorker {
       isVideo
     );
 
-    // Stage 6: 📝 معالجة الوصف (Process Caption independently from Filename)
-    const processedCaption = processActualCaption(item.originalCaption, user);
+    // Stage 6: 📝 معالجة الوصف (Process Caption)
+    let processedCaption = '';
+    if (isAiRenamed && itemProcessedCaption) {
+      // Use MedPulse standardized AI caption with scrubbed forbidden words if any
+      processedCaption = removeForbiddenWords(itemProcessedCaption, user.forbiddenWords);
+    } else {
+      processedCaption = processActualCaption(item.originalCaption, user);
+    }
+
     store.updateQueueItem(item.id, {
       status: 'processing_caption',
-      statusMessage: '📝 معالجة الوصف',
+      statusMessage: '📝 معالجة وتنسيق الوصف',
       processedCaption,
     });
     await this.updateChatStatus(
       token,
       chatId,
       msgId,
-      `📝 <b>معالجة الوصف</b>\n\n• الوصف النهائي: <code>${processedCaption || '(بدون وصف)'}</code>\n• تمت معالجة الوصف بشكل مستقل تماماً عن اسم الملف ✅`
+      `📝 <b>معالجة وتنسيق الوصف ${isAiRenamed ? '(نمط MedPulse الموحد 🫀)' : ''}</b>\n\n${processedCaption || '(بدون وصف)'}`
     );
     await new Promise((r) => setTimeout(r, 70));
 
@@ -325,6 +388,8 @@ class QueueWorker {
       `• الترتيب: <b>#${item.sequenceNumber}</b>`
     );
 
+    let wasPhysicalUpload = false;
+
     // If real Telegram bot token is configured and target is a real channel, upload the processed file via multipart/form-data
     if (token && targetChannel !== '@MediaHubArabic') {
       const uploadRes = await FileProcessor.uploadProcessedFileToTelegram(
@@ -344,6 +409,9 @@ class QueueWorker {
       if (!uploadRes.ok) {
         throw new Error(uploadRes.description || 'فشل إرسال الملف المعالج إلى القناة');
       }
+      wasPhysicalUpload = uploadRes.wasPhysicalUpload;
+    } else {
+      wasPhysicalUpload = true;
     }
 
     // Clean up temporary local files
@@ -367,7 +435,7 @@ class QueueWorker {
       filename: processedFilename,
       caption: processedCaption,
       thumbnailUrl: thumbPrep?.dataUrl || user.thumbnail?.url || 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600&auto=format&fit=crop&q=80',
-      hasCustomThumbnail: hasCustomThumb,
+      hasCustomThumbnail: hasCustomThumb && wasPhysicalUpload,
       mediaUrl: item.mediaUrl,
       fileSize,
       publishedAt: Date.now(),
@@ -379,8 +447,15 @@ class QueueWorker {
     store.updateQueueItem(item.id, {
       status: 'published',
       statusMessage: '✅ تم نشر الملف بنجاح',
+      hasCustomThumbnail: hasCustomThumb && wasPhysicalUpload,
       completedAt: Date.now(),
     });
+
+    const thumbReportText = hasCustomThumb
+      ? (wasPhysicalUpload
+          ? 'مخصصة (User Thumbnail) 🖼️ ✅ (تم الدمج والرفع بنجاح)'
+          : 'افتراضية (أُرسل كمعرّف سحابي؛ يتطلب تليجرام رفع الملف بالكامل لتغيير الصورة)')
+      : 'افتراضية (الخاصة بالملف)';
 
     await this.updateChatStatus(
       token,
@@ -389,7 +464,7 @@ class QueueWorker {
       `✅ <b>تم نشر الملف بنجاح</b>\n\n` +
       `• القناة: <b>${channelTitle}</b> (<code>${targetChannel}</code>)\n` +
       `• اسم الملف الفعلي: <code>${processedFilename}</code>\n` +
-      `• الصورة المصغرة: ${hasCustomThumb ? 'مخصصة (User Thumbnail) 🖼️' : 'افتراضية'}\n` +
+      `• الصورة المصغرة: ${thumbReportText}\n` +
       `• الوصف: ${processedCaption || '(بدون وصف)'}\n` +
       `• رقم الترتيب المنشور: <b>#${item.sequenceNumber}</b>`
     );

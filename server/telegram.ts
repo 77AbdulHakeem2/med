@@ -2,6 +2,7 @@ import { store } from './store';
 import { UserSetting, InlineKeyboardButton, SimulatedTelegramMessage } from '../src/types';
 import { processActualFilename, processActualCaption } from './pipeline';
 import { FileProcessor } from './fileProcessor';
+import { CAPTION_PRESETS, generateFormattedCaption } from './aiRenamer';
 
 const TELEGRAM_API_BASE = 'https://api.telegram.org/bot';
 
@@ -232,6 +233,10 @@ export class TelegramService {
    * Generates the Main Settings Keyboard
    */
   public static getSettingsKeyboard(user: UserSetting): { inline_keyboard: InlineKeyboardButton[][] } {
+    const config = store.getConfig();
+    const aiStatus = config.aiRenaming.enabled ? 'ON 🟢' : 'OFF ⚪';
+    const currentStyleId = config.aiRenaming.captionStyle || 'medpulse_box';
+    const activePreset = CAPTION_PRESETS.find((p) => p.id === currentStyleId) || CAPTION_PRESETS[0];
     const thumbStatus = user.thumbnail ? '✅ مفعلة' : '❌ غير محددة';
     const tagStatus = user.tag?.text ? `✅ (${user.tag.position === 'before' ? 'قبل' : 'بعد'})` : '❌ غير محدد';
     const channelStatus = user.channel?.chatId
@@ -240,6 +245,10 @@ export class TelegramService {
 
     return {
       inline_keyboard: [
+        [
+          { text: `🤖 AI Naming [${aiStatus}]`, callback_data: 'settings:ai_toggle' },
+          { text: `📝 نمط الوصف [${activePreset.name.split(' ')[1] || 'MedPulse'}]`, callback_data: 'settings:caption_style' },
+        ],
         [
           { text: `🖼️ Thumbnail [${thumbStatus}]`, callback_data: 'settings:thumb' },
           { text: `🏷️ Tag [${tagStatus}]`, callback_data: 'settings:tag' },
@@ -259,6 +268,12 @@ export class TelegramService {
    * Generates Settings Message text
    */
   public static getSettingsOverviewText(user: UserSetting): string {
+    const config = store.getConfig();
+    const aiText = config.aiRenaming.enabled
+      ? '🟢 مُفَعّل تلقائياً (ON) - تسمية موحدة ووصف فوري'
+      : '⚪ مُعَطّل (OFF) - التسمية والوصف اليدوي فقط';
+    const currentStyleId = config.aiRenaming.captionStyle || 'medpulse_box';
+    const activePreset = CAPTION_PRESETS.find((p) => p.id === currentStyleId) || CAPTION_PRESETS[0];
     const thumbText = user.thumbnail ? 'محفوظة ومفعلة تلقائياً ✅' : 'لا توجد صورة مصغرة حالياً ❌';
     const tagText = user.tag?.text
       ? `"${user.tag.text}" [${user.tag.position === 'before' ? 'قبل العنوان' : 'بعد العنوان'}]`
@@ -272,13 +287,15 @@ export class TelegramService {
     return (
       `⚙️ <b>لوحة إعدادات البوت الشخصية</b>\n\n` +
       `👤 <b>المستخدم:</b> ${user.firstName} (<code>${user.userId}</code>)\n\n` +
+      `• <b>الذكاء الاصطناعي (AI Naming):</b> ${aiText}\n` +
+      `• <b>نمط الوصف المعتمد:</b> ${activePreset.name} (${activePreset.badge})\n` +
       `• <b>الصورة المصغرة (Thumbnail):</b> ${thumbText}\n` +
       `• <b>الوسم (Tag):</b> ${tagText}\n` +
       `• <b>قناة النشر:</b> ${channelText}\n` +
       `• <b>بادئة الاسم (Prefix):</b> ${prefixText}\n` +
       `• <b>لاحقة الاسم (Suffix):</b> ${suffixText}\n` +
       `• <b>الكلمات المحظورة:</b> ${user.forbiddenWords.length} كلمة\n\n` +
-      `<i>اختر قسماً من الأزرار بالأسفل لإدارته:</i>`
+      `<i>اختر قسماً من الأزرار بالأسفل لإدارته وتغيير نمط الوصف أو التبديل بين خيارات البوت:</i>`
     );
   }
 
@@ -589,6 +606,133 @@ export class TelegramService {
       return;
     }
 
+    // AI Naming Toggle (ON / OFF)
+    if (data === 'settings:ai_toggle') {
+      const cfg = store.getConfig();
+      const newEnabled = !cfg.aiRenaming.enabled;
+      store.updateConfig({
+        aiRenaming: {
+          ...cfg.aiRenaming,
+          enabled: newEnabled,
+        },
+      });
+      await this.answerCallbackQuery(
+        token,
+        callbackQuery.id,
+        newEnabled ? '🟢 تم تفعيل AI Naming بنجاح (معالجة تلقائية فورية)' : '⚪ تم إيقاف AI Naming (معالجة يدوية)'
+      );
+      const updatedUser = store.getUser(userId);
+      await this.editMessageText(
+        token,
+        chatId,
+        messageId,
+        this.getSettingsOverviewText(updatedUser),
+        this.getSettingsKeyboard(updatedUser)
+      );
+      return;
+    }
+
+    // Caption Style Selection Menu
+    if (data === 'settings:caption_style') {
+      const cfg = store.getConfig();
+      const currentStyleId = cfg.aiRenaming.captionStyle || 'medpulse_box';
+      const sample = generateFormattedCaption(
+        {
+          doctor: 'د. محمد شريف',
+          subject: 'Embryology',
+          topic: 'Somites Development',
+          part: '1',
+        },
+        cfg.aiRenaming
+      );
+
+      const buttons: InlineKeyboardButton[][] = CAPTION_PRESETS.filter(p => p.id !== 'custom').map((preset) => [
+        {
+          text: `${preset.id === currentStyleId ? '✅ ' : ''}${preset.name}`,
+          callback_data: `settings:set_caption:${preset.id}`,
+        },
+      ]);
+
+      buttons.push([
+        { text: '🔙 العودة للإعدادات الرئيسية', callback_data: 'settings:main' },
+      ]);
+
+      const activePreset = CAPTION_PRESETS.find((p) => p.id === currentStyleId) || CAPTION_PRESETS[0];
+
+      await this.editMessageText(
+        token,
+        chatId,
+        messageId,
+        `📝 <b>أنماط تنسيق الوصف (Caption Styles)</b>\n\n` +
+        `اختر النمط المناسب؛ سيتم اعتماده وتطبيقه تلقائياً على كافة الملفات الواردة:\n\n` +
+        `<b>النمط الحالي:</b> ${activePreset.name} (${activePreset.badge})\n` +
+        `<i>${activePreset.description}</i>\n\n` +
+        `━━━━━━━━━━━━━━━━━━━\n` +
+        `🔍 <b>معاينة حية للنمط:</b>\n\n` +
+        `${sample}\n` +
+        `━━━━━━━━━━━━━━━━━━━`,
+        { inline_keyboard: buttons }
+      );
+      return;
+    }
+
+    // Handle Setting a Caption Style
+    if (data.startsWith('settings:set_caption:')) {
+      const targetStyleId = data.replace('settings:set_caption:', '');
+      const cfg = store.getConfig();
+      store.updateConfig({
+        aiRenaming: {
+          ...cfg.aiRenaming,
+          captionStyle: targetStyleId,
+        },
+      });
+
+      const selectedPreset = CAPTION_PRESETS.find((p) => p.id === targetStyleId) || CAPTION_PRESETS[0];
+      await this.answerCallbackQuery(
+        token,
+        callbackQuery.id,
+        `✅ تم تفعيل: ${selectedPreset.name}`
+      );
+
+      // Refresh caption style menu
+      const updatedCfg = store.getConfig();
+      const sample = generateFormattedCaption(
+        {
+          doctor: 'د. محمد شريف',
+          subject: 'Embryology',
+          topic: 'Somites Development',
+          part: '1',
+        },
+        updatedCfg.aiRenaming
+      );
+
+      const buttons: InlineKeyboardButton[][] = CAPTION_PRESETS.filter(p => p.id !== 'custom').map((preset) => [
+        {
+          text: `${preset.id === targetStyleId ? '✅ ' : ''}${preset.name}`,
+          callback_data: `settings:set_caption:${preset.id}`,
+        },
+      ]);
+
+      buttons.push([
+        { text: '🔙 العودة للإعدادات الرئيسية', callback_data: 'settings:main' },
+      ]);
+
+      await this.editMessageText(
+        token,
+        chatId,
+        messageId,
+        `📝 <b>أنماط تنسيق الوصف (Caption Styles)</b>\n\n` +
+        `✅ <b>تم تفعيل النمط بنجاح:</b> ${selectedPreset.name}\n` +
+        `<i>${selectedPreset.description}</i>\n\n` +
+        `━━━━━━━━━━━━━━━━━━━\n` +
+        `🔍 <b>معاينة حية للنمط المختار:</b>\n\n` +
+        `${sample}\n` +
+        `━━━━━━━━━━━━━━━━━━━`,
+        { inline_keyboard: buttons }
+      );
+      return;
+    }
+
     // Main settings menu return
     if (data === 'settings:main') {
       await this.editMessageText(
@@ -709,6 +853,8 @@ export class TelegramService {
           id: `thumb_${Date.now()}`,
           fileId,
           url: finalUrl,
+          dataUrl: stdResult?.dataUrl,
+          standard320Path: stdResult?.standard320Path,
           updatedAt: Date.now(),
         },
         pendingAction: undefined,
@@ -864,6 +1010,7 @@ export class TelegramService {
         userId,
         userFirstName: user.firstName,
         chatId: String(chatId),
+        messageId: message.message_id,
         type: isVideo ? 'video' : 'document',
         fileId,
         duration,
@@ -881,13 +1028,18 @@ export class TelegramService {
         targetChannelTitle: user.channel?.title || 'قناة ميديا العرب الرسمية',
       });
 
+      const botConfig = store.getConfig();
+      const aiNote = botConfig.aiRenaming.enabled
+        ? `\n• الذكاء الاصطناعي: 🟢 <b>AI Naming: ON</b> (تسمية موحدة ووصف MedPulse تلقائي)`
+        : `\n• الذكاء الاصطناعي: ⚪ <b>AI Naming: OFF</b> (معالجة يدوية)`;
+
       // Notify in chat with queue ticket
       if (statusMsgId) {
         await this.editMessageText(
           token,
           chatId,
           statusMsgId,
-          `📥 <b>تم استلام الملف بنجاح!</b>\n\n• الملف: <code>${originalFilename}</code>\n• رقم الانتظار: <b>#${queueItem.sequenceNumber}</b>\n• الحجم: ${(fileSize / (1024 * 1024)).toFixed(1)} MB${durationText}\n• الحالة: ⏳ في قائمة الانتظار (FIFO Queue)`
+          `📥 <b>تم استلام الملف بنجاح!</b>\n\n• الملف: <code>${originalFilename}</code>\n• رقم الانتظار: <b>#${queueItem.sequenceNumber}</b>\n• الحجم: ${(fileSize / (1024 * 1024)).toFixed(1)} MB${durationText}${aiNote}\n• الحالة: ⏳ في قائمة المعالجة المباشرة (بدون انتظار موافقة)`
         );
       }
       return;

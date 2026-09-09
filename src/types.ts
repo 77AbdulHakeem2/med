@@ -2,6 +2,8 @@ export interface UserThumbnail {
   id: string;
   fileId?: string;
   url: string;
+  dataUrl?: string;
+  standard320Path?: string;
   updatedAt: number;
 }
 
@@ -69,6 +71,7 @@ export interface QueueItem {
   userId: string;
   userFirstName: string;
   chatId: string;
+  messageId?: number;
   type: QueueItemType;
   fileId?: string;
   duration?: number;
@@ -90,6 +93,8 @@ export interface QueueItem {
   targetChannelId?: string;
   targetChannelTitle?: string;
   chunkProgress?: ChunkProgress;
+  isAiRenamed?: boolean;
+  aiGroupingReason?: string;
   error?: string;
   createdAt: number;
   completedAt?: number;
@@ -130,6 +135,43 @@ export interface BotInfo {
   supports_inline_queries?: boolean;
 }
 
+export interface CaptionStylePreset {
+  id: string;
+  name: string;
+  badge: string;
+  description: string;
+  template: string;
+}
+
+export interface AIRenamingConfig {
+  enabled: boolean;
+  namingPattern: string;
+  customInstructions: string;
+  autoApplyOnQueue: boolean;
+  captionStyle?: string;
+  customCaptionTemplate?: string;
+}
+
+export interface AIRenamedItemResult {
+  id: string;
+  originalFilename: string;
+  originalCaption?: string;
+  extractedDoctor?: string;
+  extractedSubject?: string;
+  extractedTopic?: string;
+  extractedPart?: string | number;
+  formattedFilename: string;
+  formattedCaption?: string;
+  groupingReason?: string;
+}
+
+export interface BotConfig {
+  botToken: string;
+  pollingActive: boolean;
+  webhookUrl: string;
+  aiRenaming: AIRenamingConfig;
+}
+
 export interface SystemStatus {
   botConfigured: boolean;
   botInfo: BotInfo | null;
@@ -142,6 +184,7 @@ export interface SystemStatus {
   registeredUsersCount: number;
   lastActiveTime: number;
   resumableTransfersCount: number;
+  aiRenaming?: AIRenamingConfig;
 }
 
 export interface InlineKeyboardButton {

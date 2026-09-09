@@ -21,9 +21,25 @@ export const BotConnectModal: React.FC<BotConnectModalProps> = ({
   onSaveConfig,
 }) => {
   const [tokenInput, setTokenInput] = useState('');
-  const [polling, setPolling] = useState(status?.pollingActive ?? false);
+  const [polling, setPolling] = useState(status?.pollingActive ?? true);
   const [testing, setTesting] = useState(false);
+  const [loadingConfig, setLoadingConfig] = useState(true);
   const [feedback, setFeedback] = useState<{ verified: boolean; message: string } | null>(null);
+
+  React.useEffect(() => {
+    fetch('/api/bot/config')
+      .then((r) => r.json())
+      .then((cfg) => {
+        if (cfg.botToken) {
+          setTokenInput(cfg.botToken);
+        }
+        if (cfg.pollingActive !== undefined) {
+          setPolling(cfg.pollingActive);
+        }
+      })
+      .catch((err) => console.error(err))
+      .finally(() => setLoadingConfig(false));
+  }, []);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -101,6 +117,10 @@ export const BotConnectModal: React.FC<BotConnectModalProps> = ({
               className="w-full bg-[#0a0a0a] border border-[#282828] rounded px-3 py-2 text-xs text-[#e0e0e0] font-mono focus:outline-none focus:border-sky-500/60"
               dir="ltr"
             />
+            <div className="mt-2 flex items-center gap-1.5 text-[11px] text-emerald-400/90 font-sans bg-emerald-950/20 border border-emerald-800/30 p-2 rounded">
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
+              <span>يتم حفظ هذا الرمز تلقائياً ودائماً في بيئة التشغيل، ولن تضطر لإعادة إدخاله عند العمليات القادمة.</span>
+            </div>
             <p className="text-[10px] text-[#777] mt-1 font-sans">
               يمكنك الحصول على التوكن مجاناً من خلال التحدث مع <b className="text-sky-400 font-mono">@BotFather</b> داخل التيليجرام وإنشاء بوت جديد عبر أمر <code className="text-amber-400 font-mono">/newbot</code>.
             </p>
