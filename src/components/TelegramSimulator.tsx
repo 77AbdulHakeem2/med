@@ -3,6 +3,7 @@ import {
   Send,
   Image as ImageIcon,
   Video,
+  Music,
   Sliders,
   Sparkles,
   Info,
@@ -16,6 +17,7 @@ interface TelegramSimulatorProps {
   onSendMessage: (text: string) => Promise<void>;
   onSendPhoto: (photoUrl: string, caption?: string) => Promise<void>;
   onSendVideo: (filename: string, fileSize: number, caption?: string) => Promise<void>;
+  onSendAudio?: (filename: string, fileSize: number, caption?: string, performer?: string, title?: string) => Promise<void>;
   onSendBatch: () => Promise<void>;
   onCallbackQuery: (messageId: number, data: string) => Promise<void>;
   loading: boolean;
@@ -27,16 +29,19 @@ export const TelegramSimulator: React.FC<TelegramSimulatorProps> = ({
   onSendMessage,
   onSendPhoto,
   onSendVideo,
+  onSendAudio,
   onSendBatch,
   onCallbackQuery,
   loading,
 }) => {
   const [inputText, setInputText] = useState('');
   const [showMediaModal, setShowMediaModal] = useState(false);
-  const [mediaModalType, setMediaModalType] = useState<'photo' | 'video'>('photo');
+  const [mediaModalType, setMediaModalType] = useState<'photo' | 'video' | 'audio'>('photo');
   const [customFilename, setCustomFilename] = useState('Movie 01 - موقع_مشبوه - 1080p.mp4');
   const [customCaption, setCustomCaption] = useState('حلقة خاصة - موقع_مشبوه للتنزيل');
   const [customFileSizeMb, setCustomFileSizeMb] = useState(48);
+  const [customPerformer, setCustomPerformer] = useState('مشاري العفاسي');
+  const [customAudioTitle, setCustomAudioTitle] = useState('تلاوة خاشعة');
   const [customPhotoUrl, setCustomPhotoUrl] = useState(
     'https://images.unsplash.com/photo-1579783902614-a3fb3927b675?w=600&auto=format&fit=crop&q=80'
   );
@@ -75,6 +80,12 @@ export const TelegramSimulator: React.FC<TelegramSimulatorProps> = ({
       reader.readAsDataURL(file);
     } else if (file.type.startsWith('video/') || file.name.endsWith('.mp4') || file.name.endsWith('.mkv')) {
       onSendVideo(file.name, file.size, 'ملف فيديو من الجهاز');
+    } else if (file.type.startsWith('audio/') || file.name.endsWith('.mp3') || file.name.endsWith('.m4a') || file.name.endsWith('.ogg') || file.name.endsWith('.wav')) {
+      if (onSendAudio) {
+        onSendAudio(file.name, file.size, 'ملف صوتي من الجهاز');
+      } else {
+        onSendVideo(file.name, file.size, 'ملف صوتي من الجهاز');
+      }
     }
   };
 
@@ -127,6 +138,19 @@ export const TelegramSimulator: React.FC<TelegramSimulatorProps> = ({
           >
             <Video className="w-3 h-3 text-emerald-400" />
             <span>إرسال فيديو مخصص</span>
+          </button>
+          <button
+            onClick={() => {
+              setMediaModalType('audio');
+              setCustomFilename('Audio Track 01 - موقع_مشبوه.mp3');
+              setCustomCaption('تسجيل صوتي خاص - موقع_مشبوه');
+              setCustomFileSizeMb(12);
+              setShowMediaModal(true);
+            }}
+            className="flex items-center gap-1 px-2.5 py-1 bg-[#161616] hover:bg-[#202020] text-[#ccc] border border-[#2b2b2b] hover:border-[#444] rounded transition text-[11px] font-mono"
+          >
+            <Music className="w-3 h-3 text-emerald-400" />
+            <span>إرسال صوتي مخصص</span>
           </button>
           <button
             onClick={onSendBatch}
@@ -252,7 +276,8 @@ export const TelegramSimulator: React.FC<TelegramSimulatorProps> = ({
                             .replace(/\n/g, '<br/>')
                             .replace(/<b>(.*?)<\/b>/g, '<strong class="font-semibold text-white">$1</strong>')
                             .replace(/<code>(.*?)<\/code>/g, '<code class="bg-[#1e1e1e] text-amber-300 font-mono px-1 py-0.5 rounded border border-[#2f2f2f] text-[11px]">$1</code>')
-                            .replace(/<i>(.*?)<\/i>/g, '<em class="text-[#888]">$1</em>'),
+                            .replace(/<i>(.*?)<\/i>/g, '<em class="text-[#888]">$1</em>')
+                            .replace(/<a\s+href="([^"]+)"[^>]*>(.*?)<\/a>/gi, '<a href="$1" target="_blank" rel="noreferrer" class="text-sky-400 hover:text-sky-300 underline font-semibold decoration-sky-400/50 hover:decoration-sky-300 transition-colors">$2</a>'),
                         }}
                       />
                     )}
@@ -357,15 +382,22 @@ export const TelegramSimulator: React.FC<TelegramSimulatorProps> = ({
         <div className="fixed inset-0 bg-black/80 backdrop-blur-xs z-50 flex items-center justify-center p-4">
           <div className="bg-[#141414] border border-[#262626] rounded-lg w-full max-w-md p-5 shadow-2xl text-[#e0e0e0]">
             <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2 font-mono">
-              {mediaModalType === 'photo' ? (
+              {mediaModalType === 'photo' && (
                 <>
                   <ImageIcon className="w-4 h-4 text-sky-400" />
                   <span>UPLOAD_THUMBNAIL_TEST</span>
                 </>
-              ) : (
+              )}
+              {mediaModalType === 'video' && (
                 <>
                   <Video className="w-4 h-4 text-emerald-400" />
                   <span>SEND_VIDEO_TEST</span>
+                </>
+              )}
+              {mediaModalType === 'audio' && (
+                <>
+                  <Music className="w-4 h-4 text-emerald-400" />
+                  <span>SEND_AUDIO_TEST</span>
                 </>
               )}
             </h3>
@@ -397,28 +429,46 @@ export const TelegramSimulator: React.FC<TelegramSimulatorProps> = ({
               <div className="space-y-3">
                 <div className="flex items-center gap-1.5 flex-wrap pb-1">
                   <span className="text-[10px] text-[#666] font-mono">PRESETS:</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCustomFilename('Movie ABC 01.mp4');
-                      setCustomCaption('Movie ABC 01 - Special Edition');
-                      setCustomFileSizeMb(32);
-                    }}
-                    className="px-2 py-0.5 bg-[#1a1a1a] hover:bg-[#252525] text-amber-300 text-[10px] rounded border border-[#333] font-mono"
-                  >
-                    Movie ABC 01 (كلمة محظورة)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCustomFilename('Episode 05.mp4');
-                      setCustomCaption('Episode 05 - Season 1');
-                      setCustomFileSizeMb(28);
-                    }}
-                    className="px-2 py-0.5 bg-[#1a1a1a] hover:bg-[#252525] text-sky-300 text-[10px] rounded border border-[#333] font-mono"
-                  >
-                    Episode 05 (فصل الاسم والوصف)
-                  </button>
+                  {mediaModalType === 'audio' ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomFilename('Audio Track 01 - موقع_مشبوه - 320k.mp3');
+                        setCustomCaption('تسجيل صوتي - موقع_مشبوه للتحميل');
+                        setCustomPerformer('مشاري العفاسي');
+                        setCustomAudioTitle('سورة الفاتحة');
+                        setCustomFileSizeMb(14);
+                      }}
+                      className="px-2 py-0.5 bg-[#1a1a1a] hover:bg-[#252525] text-emerald-300 text-[10px] rounded border border-[#333] font-mono"
+                    >
+                      Audio Track (مع محظور وفنان)
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCustomFilename('Movie ABC 01.mp4');
+                          setCustomCaption('Movie ABC 01 - Special Edition');
+                          setCustomFileSizeMb(32);
+                        }}
+                        className="px-2 py-0.5 bg-[#1a1a1a] hover:bg-[#252525] text-amber-300 text-[10px] rounded border border-[#333] font-mono"
+                      >
+                        Movie ABC 01 (كلمة محظورة)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCustomFilename('Episode 05.mp4');
+                          setCustomCaption('Episode 05 - Season 1');
+                          setCustomFileSizeMb(28);
+                        }}
+                        className="px-2 py-0.5 bg-[#1a1a1a] hover:bg-[#252525] text-sky-300 text-[10px] rounded border border-[#333] font-mono"
+                      >
+                        Episode 05 (فصل الاسم والوصف)
+                      </button>
+                    </>
+                  )}
                 </div>
 
                 <div>
@@ -434,6 +484,29 @@ export const TelegramSimulator: React.FC<TelegramSimulatorProps> = ({
                     إذا وُجدت كلمة محظورة في الاسم (مثل "ABC") سيتم حذفها أولاً ثم تطبيق Prefix/Suffix على اسم الملف الحقيقي.
                   </span>
                 </div>
+
+                {mediaModalType === 'audio' && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[11px] font-mono text-[#aaa] block mb-1">PERFORMER (الفنان):</label>
+                      <input
+                        type="text"
+                        value={customPerformer}
+                        onChange={(e) => setCustomPerformer(e.target.value)}
+                        className="w-full bg-[#0a0a0a] border border-[#262626] rounded px-3 py-1.5 text-xs text-[#e0e0e0] focus:outline-none focus:border-emerald-500/60"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-mono text-[#aaa] block mb-1">TITLE (العنوان):</label>
+                      <input
+                        type="text"
+                        value={customAudioTitle}
+                        onChange={(e) => setCustomAudioTitle(e.target.value)}
+                        className="w-full bg-[#0a0a0a] border border-[#262626] rounded px-3 py-1.5 text-xs text-[#e0e0e0] focus:outline-none focus:border-emerald-500/60"
+                      />
+                    </div>
+                  </div>
+                )}
 
                 <div>
                   <label className="text-[11px] font-mono text-[#aaa] block mb-1">CAPTION:</label>
@@ -474,6 +547,12 @@ export const TelegramSimulator: React.FC<TelegramSimulatorProps> = ({
                   setShowMediaModal(false);
                   if (mediaModalType === 'photo') {
                     await onSendPhoto(customPhotoUrl);
+                  } else if (mediaModalType === 'audio') {
+                    if (onSendAudio) {
+                      await onSendAudio(customFilename, customFileSizeMb * 1024 * 1024, customCaption, customPerformer, customAudioTitle);
+                    } else {
+                      await onSendVideo(customFilename, customFileSizeMb * 1024 * 1024, customCaption);
+                    }
                   } else {
                     await onSendVideo(customFilename, customFileSizeMb * 1024 * 1024, customCaption);
                   }

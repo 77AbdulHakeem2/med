@@ -20,8 +20,13 @@ import {
   Eye,
   EyeOff,
   Sliders,
+  FileText,
+  Zap,
+  Gauge,
+  Cpu,
+  Rocket,
 } from 'lucide-react';
-import { UserSetting, AIRenamingConfig } from '../types';
+import { UserSetting, AIRenamingConfig, CAPTION_STYLE_PRESETS } from '../types';
 
 interface SettingsManagerProps {
   user: UserSetting;
@@ -46,6 +51,8 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
   const [botPolling, setBotPolling] = useState(true);
   const [savingBotToken, setSavingBotToken] = useState(false);
   const [botTokenFeedback, setBotTokenFeedback] = useState<{ verified: boolean; message: string } | null>(null);
+  const [isFromSecret, setIsFromSecret] = useState(false);
+  const [hasGeminiKeyConflict, setHasGeminiKeyConflict] = useState(false);
 
   // AI Renaming Configuration state
   const [aiEnabled, setAiEnabled] = useState(true);
@@ -55,6 +62,12 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
   const [captionStyle, setCaptionStyle] = useState('medpulse_box');
   const [customCaptionTemplate, setCustomCaptionTemplate] = useState('');
   const [savingAiConfig, setSavingAiConfig] = useState(false);
+
+  // Turbo Speed Engine state
+  const [turboEnabled, setTurboEnabled] = useState(true);
+  const [fastStatusUpdates, setFastStatusUpdates] = useState(true);
+  const [preloadNextItem, setPreloadNextItem] = useState(true);
+  const [savingTurbo, setSavingTurbo] = useState(false);
 
   // Fetch bot & AI configuration on mount
   useEffect(() => {
@@ -68,6 +81,12 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
         if (data.pollingActive !== undefined) {
           setBotPolling(data.pollingActive);
         }
+        if (data.isFromSecret !== undefined) {
+          setIsFromSecret(data.isFromSecret);
+        }
+        if (data.hasGeminiKeyConflict !== undefined) {
+          setHasGeminiKeyConflict(data.hasGeminiKeyConflict);
+        }
         if (data.aiRenaming) {
           setAiEnabled(data.aiRenaming.enabled ?? true);
           setNamingPattern(data.aiRenaming.namingPattern || '{subject} - د. {doctor} - {topic} [Part {part}]');
@@ -76,9 +95,44 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
           setCaptionStyle(data.aiRenaming.captionStyle || 'medpulse_box');
           setCustomCaptionTemplate(data.aiRenaming.customCaptionTemplate || '');
         }
+        if (data.turboSpeed) {
+          setTurboEnabled(data.turboSpeed.enabled ?? true);
+          setFastStatusUpdates(data.turboSpeed.fastStatusUpdates ?? true);
+          setPreloadNextItem(data.turboSpeed.preloadNextItem ?? true);
+        }
       })
       .catch((err) => console.error('Failed to load bot/AI config:', err));
   }, []);
+
+  // Update Turbo Speed Settings
+  const handleUpdateTurbo = async (changes: Partial<{ enabled: boolean; fastStatusUpdates: boolean; preloadNextItem: boolean }>) => {
+    const nextTurbo = {
+      enabled: changes.enabled !== undefined ? changes.enabled : turboEnabled,
+      fastStatusUpdates: changes.fastStatusUpdates !== undefined ? changes.fastStatusUpdates : fastStatusUpdates,
+      preloadNextItem: changes.preloadNextItem !== undefined ? changes.preloadNextItem : preloadNextItem,
+      aiCacheEnabled: true,
+      ultrafastFfmpeg: true,
+    };
+    if (changes.enabled !== undefined) setTurboEnabled(changes.enabled);
+    if (changes.fastStatusUpdates !== undefined) setFastStatusUpdates(changes.fastStatusUpdates);
+    if (changes.preloadNextItem !== undefined) setPreloadNextItem(changes.preloadNextItem);
+
+    setSavingTurbo(true);
+    try {
+      await fetch('/api/bot/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          turboSpeed: nextTurbo,
+        }),
+      });
+      showFeedback('تم تطبيق وحفظ إعدادات السرعة الفائقة بنجاح ⚡');
+    } catch {
+      showFeedback('فشل حفظ إعدادات السرعة الفائقة');
+    } finally {
+      setSavingTurbo(false);
+    }
+  };
 
   // Toggle AI Naming (ON / OFF) with instant server synchronization
   const handleToggleAiEnabled = async () => {
@@ -224,6 +278,18 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
 
   const [savedSuccess, setSavedSuccess] = useState<string | null>(null);
 
+  // Sync state whenever the active user or user settings update
+  useEffect(() => {
+    setTagText(user.tag?.text || '');
+    setTagPosition(user.tag?.position || 'before');
+    setNamingPrefix(user.namingPrefix || '');
+    setNamingSuffix(user.namingSuffix || '');
+    setCaptionPrefix(user.captionPrefix || '');
+    setCaptionSuffix(user.captionSuffix || '');
+    setChannelChatId(user.channel?.chatId || '@MediaHubArabic');
+    setPublishingEnabled(user.channel?.publishingEnabled ?? true);
+  }, [user]);
+
   const showFeedback = (msg: string) => {
     setSavedSuccess(msg);
     setTimeout(() => setSavedSuccess(null), 3500);
@@ -333,23 +399,24 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
   const demoOriginal = 'Movie ABC - كلمة_محظورة - 001.mp4';
   let demoCleaned = demoOriginal;
   user.forbiddenWords.forEach((fw) => {
-    demoCleaned = demoCleaned.replace(new RegExp(fw, 'gi'), '');
+    if (!fw || !fw.trim()) return;
+    const escaped = fw.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    demoCleaned = demoCleaned.replace(new RegExp(escaped, 'gi'), '');
   });
   demoCleaned = demoCleaned.replace(/\s{2,}/g, ' ').trim();
   const ext = '.mp4';
-  const base = demoCleaned.replace(ext, '').trim();
+  let base = demoCleaned.replace(/\.mp4$/i, '').trim();
 
-  let demoResult = base;
   if (tagText.trim()) {
-    demoResult = tagPosition === 'before' ? `${tagText.trim()} ${demoResult}` : `${demoResult} ${tagText.trim()}`;
+    base = tagPosition === 'before' ? `${tagText.trim()} ${base}` : `${base} ${tagText.trim()}`;
   }
-  if (namingPrefix.trim()) {
-    demoResult = `${namingPrefix.trim()} ${demoResult}`;
+  if (namingPrefix.trim() && !base.startsWith(namingPrefix.trim())) {
+    base = `${namingPrefix.trim()} ${base}`;
   }
-  if (namingSuffix.trim()) {
-    demoResult = `${demoResult} ${namingSuffix.trim()}`;
+  if (namingSuffix.trim() && !base.endsWith(namingSuffix.trim())) {
+    base = `${base} ${namingSuffix.trim()}`;
   }
-  demoResult = `${demoResult}${ext}`;
+  const demoResult = `${base}${ext}`;
 
   return (
     <div className="max-w-5xl mx-auto p-3 sm:p-6 space-y-5 select-none">
@@ -413,7 +480,7 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
                 {botConfigured ? (
                   <>
                     <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                    <span>محفوظ ونشط تلقائياً ✅</span>
+                    <span>{isFromSecret ? 'محفوظ كـ Secret ونشط دائماً 🔐' : 'محفوظ ونشط تلقائياً ✅'}</span>
                   </>
                 ) : (
                   <>
@@ -426,8 +493,28 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
           </div>
 
           <p className="text-xs text-[#999] leading-relaxed font-sans">
-            أدخل الـ <b>Token</b> الخاص بالبوت مرة واحدة هنا ليتم حفظه وتثبيته في بيئة التشغيل واستخدامه تلقائيًا طوال فترة تشغيل الأداة، بحيث لا تضطر إلى إدخاله في كل مرة أو مع كل عملية.
+            أدخل الـ <b>Token</b> الخاص بالبوت مرة واحدة هنا ليتم حفظه وتثبيته في قاعدة البيانات وبيئة التشغيل واستخدامه تلقائيًا طوال فترة تشغيل الأداة، بحيث لا تضطر إلى إدخاله في كل مرة أو مع كل عملية.
           </p>
+
+          {/* Secret / Persistent Storage status info */}
+          <div className="p-3 bg-gradient-to-r from-sky-950/20 to-transparent border border-sky-800/30 rounded text-xs space-y-1.5 font-sans">
+            <div className="flex items-center gap-2 text-sky-400 font-medium">
+              <span className="text-base">🔐</span>
+              <span>تثبيت التوكن كـ Secret في إعدادات الأداة:</span>
+            </div>
+            <p className="text-[#aaa] text-[11px] leading-relaxed">
+              لتثبيت التوكن للأبد حتى مع إعادة التشغيل الكاملة للسيرفر: يمكنك إضافة الرمز في قائمة <b>Settings (⚙️)</b> في الزاوية العلوية للمنصة تحت بند <b>Secrets</b> باسم المتغير: <code className="text-white font-mono bg-black/40 px-1 py-0.5 rounded border border-white/10">TELEGRAM_BOT_TOKEN</code>. يقوم النظام بقراءته وتفعيله تلقائياً وبشكل دائم.
+            </p>
+          </div>
+
+          {hasGeminiKeyConflict && (
+            <div className="p-3 bg-amber-950/30 border border-amber-800/40 rounded text-xs text-amber-300 font-sans flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
+              <span>
+                <b>ملاحظة:</b> تم اكتشاف مفتاح Gemini API في متغير البيئة، وقام النظام تلقائياً بالحفاظ على توكن بوت التيليجرام الحقيقي الصحيح من قاعدة البيانات دون استبداله.
+              </span>
+            </div>
+          )}
 
           <div className="space-y-3">
             <div>
@@ -471,6 +558,15 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
                   )}
                 </button>
               </div>
+
+              {botToken.trim().startsWith('AIza') && (
+                <div className="mt-2 p-2.5 rounded bg-amber-950/40 border border-amber-800/60 text-amber-300 text-[11px] font-sans flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
+                  <span>
+                    ⚠️ <b>تنبيه:</b> الرمز المدخل يبدو كـ مفتاح Google Gemini API وليس توكن تيليجرام. توكن تيليجرام يبدأ بأرقام مثل <code>7529022034:AA...</code> ويتم إنشاؤه عبر بوت <b>@BotFather</b>.
+                  </span>
+                </div>
+              )}
             </div>
 
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 bg-[#0a0a0a] border border-[#222] rounded text-xs">
@@ -631,7 +727,102 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
             </div>
           </div>
 
-          {/* Interactive Batch Preview & MedPulse Caption Template */}
+          {/* Caption Style Selection & Presets */}
+          <div className="space-y-3 pt-2 border-t border-[#222]">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+              <div className="flex items-center gap-2">
+                <FileText className="w-4 h-4 text-rose-400" />
+                <label className="text-xs font-mono font-semibold text-[#eee]">
+                  أنماط تنسيق الوصف (CAPTION_STYLES):
+                </label>
+              </div>
+              <span className="text-[11px] text-[#888] font-sans">
+                اختر النمط المناسب أو قم بإنشاء قالبك الخاص — يُطبق تلقائياً على كافة الملفات
+              </span>
+            </div>
+
+            {/* Presets Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+              {CAPTION_STYLE_PRESETS.map((preset) => {
+                const isSelected = captionStyle === preset.id;
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => handleSelectCaptionStyle(preset.id)}
+                    className={`p-3 rounded-lg border text-right transition-all flex flex-col justify-between gap-2 relative ${
+                      isSelected
+                        ? 'bg-rose-950/25 border-rose-500/80 shadow-md shadow-rose-950/30 ring-1 ring-rose-500/40'
+                        : 'bg-[#0a0a0a] border-[#222] hover:border-[#3a3a3a] hover:bg-[#121212]'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2 w-full">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-medium ${
+                        isSelected ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30' : 'bg-[#181818] text-[#888]'
+                      }`}>
+                        {preset.badge}
+                      </span>
+                      {isSelected && (
+                        <span className="w-2 h-2 rounded-full bg-rose-400 animate-pulse" />
+                      )}
+                    </div>
+
+                    <div className="space-y-1 w-full">
+                      <div className={`text-xs font-bold font-sans ${isSelected ? 'text-rose-300' : 'text-[#ddd]'}`}>
+                        {preset.name}
+                      </div>
+                      <p className="text-[10px] text-[#777] font-sans leading-relaxed line-clamp-2">
+                        {preset.description}
+                      </p>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Custom Template Editor if 'custom' is active */}
+            {captionStyle === 'custom' && (
+              <div className="bg-[#0a0a0a] border border-amber-900/40 rounded-lg p-3 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-mono text-amber-300 font-semibold">
+                    محرر القالب المخصص (CUSTOM_TEMPLATE):
+                  </span>
+                  <span className="text-[10px] text-[#777]">انقر على المتغير لإضافته للقالب</span>
+                </div>
+
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    { token: '{medpulse_link}', label: 'رابط MedPulse🫀' },
+                    { token: '{subject}', label: 'المادة' },
+                    { token: '{doctor}', label: 'الدكتور' },
+                    { token: '{topic}', label: 'الموضوع' },
+                    { token: '{part}', label: 'الجزء' },
+                    { token: '#{hashtag}', label: 'الهاشتاق' },
+                    { token: '{channel}', label: 'معرف القناة' },
+                  ].map((v) => (
+                    <button
+                      key={v.token}
+                      type="button"
+                      onClick={() => setCustomCaptionTemplate((prev) => `${prev} ${v.token}`.trim())}
+                      className="text-[10px] font-mono bg-[#161616] hover:bg-amber-950/40 text-amber-300 border border-amber-900/30 px-2 py-0.5 rounded transition"
+                    >
+                      +{v.token} ({v.label})
+                    </button>
+                  ))}
+                </div>
+
+                <textarea
+                  rows={4}
+                  value={customCaptionTemplate}
+                  onChange={(e) => setCustomCaptionTemplate(e.target.value)}
+                  placeholder="اكتب قالبك هنا، مثال:&#10;{medpulse_link} | {subject}&#10;👨‍⚕️ د. {doctor}&#10;📌 {topic} {part}&#10;#{hashtag}"
+                  className="w-full bg-[#111] border border-[#282828] rounded px-3 py-2 text-xs text-[#e0e0e0] font-mono focus:outline-none focus:border-amber-500/60 leading-relaxed"
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Interactive Batch Preview & Live Caption Template */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             {/* Filename Preview */}
             <div className="bg-[#0a0a0a] border border-[#222] p-3 rounded-lg space-y-2">
@@ -664,17 +855,67 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
               </div>
             </div>
 
-            {/* MedPulse Caption Preview */}
+            {/* Selected Caption Live Preview */}
             <div className="bg-[#0a0a0a] border border-rose-950/40 p-3 rounded-lg space-y-2">
               <div className="flex items-center justify-between text-[11px] font-mono text-[#777]">
                 <span className="text-rose-400 flex items-center gap-1 font-semibold">
-                  <span>قالب كابشن MedPulse الموحد 🫀 (CAPTION_FORMAT):</span>
+                  <span>معاينة نمط الوصف المختار (LIVE_CAPTION_PREVIEW):</span>
                 </span>
-                <span className="text-[10px] text-emerald-400">هايبرلينك تليجرام معتمد</span>
+                <span className="text-[10px] text-emerald-400">
+                  {CAPTION_STYLE_PRESETS.find(p => p.id === captionStyle)?.badge || 'مخصص'}
+                </span>
               </div>
 
               <div className="bg-[#111] p-2.5 rounded border border-rose-900/30 text-[11px] font-mono leading-relaxed text-[#ccc] whitespace-pre-line" dir="auto">
-                {`━━━━━━━━━━━━━━━\n📕 Name\n`}<a href="https://t.me/addlist/Qr1Wx2nHR_MxZjM0" target="_blank" rel="noreferrer" className="text-sky-400 underline font-semibold">MedPulse🫀</a>{` | د. محمد شريف\nEmbryology\n@MedPulseVIP\n━━━━━━━━━━━━━━━\n📌 Topic\nSomites Development\n━━━━━━━━━━━━━━━\n#Embryology`}
+                {captionStyle === 'medpulse_box' && (
+                  <>
+                    {`━━━━━━━━━━━━━━━\n📕 Name :\n`}
+                    <a href="https://t.me/addlist/Qr1Wx2nHR_MxZjM0" target="_blank" rel="noreferrer" className="text-sky-400 underline font-semibold">MedPulse🫀</a>
+                    {` | د. محمد شريف\n━━━━━━━━━━━━━━━\n📌 Topic\nSomites Development [Part 1]\n━━━━━━━━━━━━━━━\n@MedPulseVIP | #Embryology`}
+                  </>
+                )}
+                {captionStyle === 'academic_badges' && (
+                  <>
+                    <span>🩺 </span>
+                    <a href="https://t.me/addlist/Qr1Wx2nHR_MxZjM0" target="_blank" rel="noreferrer" className="text-sky-400 underline font-semibold">MedPulse🫀</a>
+                    {`\n━━━━━━━━━━━━━━━━━━\n📚 المادة: Embryology\n👨‍⚕️ الدكتور: د. محمد شريف\n📑 المحاضرة: Somites Development\n🔢 الجزء: Part 1\n━━━━━━━━━━━━━━━━━━\n📢 القناة: @MedPulseVIP\n#Embryology`}
+                  </>
+                )}
+                {captionStyle === 'modern_minimal' && (
+                  <>
+                    <a href="https://t.me/addlist/Qr1Wx2nHR_MxZjM0" target="_blank" rel="noreferrer" className="text-sky-400 underline font-semibold">MedPulse🫀</a>
+                    {` | Embryology\n▪️ المحاضر: د. محمد شريف\n▫️ الموضوع: Somites Development Part 1\n\n🔗 @MedPulseVIP • #Embryology`}
+                  </>
+                )}
+                {captionStyle === 'compact_bullets' && (
+                  <>
+                    <span>◈ </span>
+                    <a href="https://t.me/addlist/Qr1Wx2nHR_MxZjM0" target="_blank" rel="noreferrer" className="text-sky-400 underline font-semibold">MedPulse🫀</a>
+                    <span> ◈</span>
+                    {`\n▸ الكورس: Embryology\n▸ الدكتور: د. محمد شريف\n▸ العنوان: Somites Development Part 1\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n@MedPulseVIP • #Embryology`}
+                  </>
+                )}
+                {captionStyle === 'single_line_clean' && (
+                  <>
+                    <a href="https://t.me/addlist/Qr1Wx2nHR_MxZjM0" target="_blank" rel="noreferrer" className="text-sky-400 underline font-semibold">MedPulse🫀</a>
+                    {` • Embryology\nد. محمد شريف — Somites Development Part 1\n@MedPulseVIP • #Embryology`}
+                  </>
+                )}
+                {captionStyle === 'custom' && (
+                  customCaptionTemplate.trim() ? (
+                    customCaptionTemplate
+                      .replace(/\{medpulse_link\}/g, 'MedPulse🫀')
+                      .replace(/\{doctor\}/g, 'د. محمد شريف')
+                      .replace(/\{subject\}/g, 'Embryology')
+                      .replace(/\{topic\}/g, 'Somites Development')
+                      .replace(/\{part\}/g, 'Part 1')
+                      .replace(/#\{hashtag\}/g, '#Embryology')
+                      .replace(/\{hashtag\}/g, 'Embryology')
+                      .replace(/\{channel\}/g, '@MedPulseVIP')
+                  ) : (
+                    <span className="text-[#666] italic">اكتب قالبك المخصص في الصندوق أعلاه لمعاينته فورياً هنا...</span>
+                  )
+                )}
               </div>
             </div>
           </div>
@@ -726,6 +967,168 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
                 </>
               )}
             </button>
+          </div>
+        </div>
+
+        {/* === CARD 2.5: Ultra Turbo Speed & Performance Engine (Full Width) === */}
+        <div className="col-span-1 md:col-span-2 bg-[#111111] border border-amber-500/30 rounded-lg p-5 space-y-4 shadow-sm relative overflow-hidden">
+          <div className="absolute top-0 right-0 left-0 h-[2px] bg-gradient-to-r from-amber-500/30 via-yellow-400 to-amber-500/20" />
+          
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#222] pb-3">
+            <div className="flex items-center gap-2.5 text-[#f0f0f0] font-mono text-xs font-semibold uppercase tracking-wider">
+              <div className="w-7 h-7 rounded bg-amber-500/10 text-amber-400 border border-amber-500/30 flex items-center justify-center">
+                <Zap className="w-4 h-4" />
+              </div>
+              <div>
+                <span className="text-sm font-bold font-sans text-amber-300">محرك السرعة الفائقة والمعالجة اللحظية (Ultra Turbo Engine)</span>
+                <span className="block text-[10px] text-[#777] font-mono">0ms_LATENCY • ASYNC_IO • PIPELINED_PREWARM</span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className={`text-[11px] font-mono px-2.5 py-1 rounded border flex items-center gap-1.5 ${
+                turboEnabled
+                  ? 'bg-amber-950/40 border-amber-700/50 text-amber-400 font-bold'
+                  : 'bg-[#1a1a1a] border-[#333] text-[#777]'
+              }`}>
+                <Rocket className="w-3.5 h-3.5 text-amber-400" />
+                <span>{turboEnabled ? 'TURBO_SPEED: ACTIVE (أقصى سرعة) ⚡' : 'TURBO_SPEED: OFF'}</span>
+              </span>
+
+              <button
+                type="button"
+                onClick={() => handleUpdateTurbo({ enabled: !turboEnabled })}
+                disabled={savingTurbo}
+                className={`px-3 py-1 rounded text-xs font-mono font-bold transition flex items-center gap-1.5 border ${
+                  turboEnabled
+                    ? 'bg-amber-500 hover:bg-amber-400 text-black border-amber-400'
+                    : 'bg-[#181818] hover:bg-[#222] text-[#ccc] border-[#333]'
+                }`}
+              >
+                {turboEnabled ? 'تعطيل السرعة الفائقة' : 'تفعيل أقصى سرعة ⚡'}
+              </button>
+            </div>
+          </div>
+
+          <p className="text-xs text-[#aaa] leading-relaxed font-sans">
+            تم تطبيق حزمة متكاملة من أحدث تقنيات تسريع الأنظمة البرمجية لتحقيق <b>أقصى سرعة معالجة ممكنة للملفات</b>، تشمل إزالة التأخيرات الزمنية، المعالجة التزامنية المتوازية، التخزين المؤقت في الذاكرة (In-Memory Cache)، واختزال طلبات الشبكة.
+          </p>
+
+          {/* Speed Optimization Modules Grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 pt-1">
+            
+            {/* 1. Zero-Latency Event Trigger */}
+            <div className="bg-[#0c0c0c] border border-[#222] p-3 rounded-lg space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-[#eee] flex items-center gap-1.5 font-sans">
+                  <Gauge className="w-3.5 h-3.5 text-amber-400" />
+                  <span>معالجة فورية بلا تأخير</span>
+                </span>
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-950/50 text-emerald-400 border border-emerald-800/40">
+                  0ms Delay
+                </span>
+              </div>
+              <p className="text-[11px] text-[#777] font-sans leading-relaxed">
+                استبدال دورات الانتظار الزمنية بنظام أحداث فوري (Event-Driven) ينطلق في نفس اللحظة التي يُدرج فيها الملف.
+              </p>
+            </div>
+
+            {/* 2. Fast Telegram API Status */}
+            <div className="bg-[#0c0c0c] border border-[#222] p-3 rounded-lg space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-[#eee] flex items-center gap-1.5 font-sans">
+                  <Bot className="w-3.5 h-3.5 text-sky-400" />
+                  <span>تحديثات التليجرام السريعة</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleUpdateTurbo({ fastStatusUpdates: !fastStatusUpdates })}
+                  className={`text-[10px] font-mono px-1.5 py-0.5 rounded border transition ${
+                    fastStatusUpdates
+                      ? 'bg-sky-950/50 text-sky-300 border-sky-800/40 font-bold'
+                      : 'bg-[#181818] text-[#777] border-[#333]'
+                  }`}
+                >
+                  {fastStatusUpdates ? 'مفعّل (أسرع 3x)' : 'معطل (مفصل)'}
+                </button>
+              </div>
+              <p className="text-[11px] text-[#777] font-sans leading-relaxed">
+                اختزال طلبات الشبكة لتقليص استهلاك API وتفادي حدود المعدل (429) وتوفير 3+ ثوانٍ من زمن معالجة كل ملف.
+              </p>
+            </div>
+
+            {/* 3. Concurrent Pre-Warming & Pipelining */}
+            <div className="bg-[#0c0c0c] border border-[#222] p-3 rounded-lg space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-[#eee] flex items-center gap-1.5 font-sans">
+                  <Cpu className="w-3.5 h-3.5 text-purple-400" />
+                  <span>التحليل والتجهيز بالتوازي</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleUpdateTurbo({ preloadNextItem: !preloadNextItem })}
+                  className={`text-[10px] font-mono px-1.5 py-0.5 rounded border transition ${
+                    preloadNextItem
+                      ? 'bg-purple-950/50 text-purple-300 border-purple-800/40 font-bold'
+                      : 'bg-[#181818] text-[#777] border-[#333]'
+                  }`}
+                >
+                  {preloadNextItem ? 'Pipelining: ON' : 'Pipelining: OFF'}
+                </button>
+              </div>
+              <p className="text-[11px] text-[#777] font-sans leading-relaxed">
+                أثناء رفع أو تجهيز الملف الحالي، يقوم المحرك بتحليل وتسمية الملفات التالية في الطابور تلقائياً في الخلفية.
+              </p>
+            </div>
+
+            {/* 4. AI In-Memory Result Caching */}
+            <div className="bg-[#0c0c0c] border border-[#222] p-3 rounded-lg space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-[#eee] flex items-center gap-1.5 font-sans">
+                  <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>كاش الذكاء الاصطناعي الفوري</span>
+                </span>
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-950/50 text-emerald-400 border border-emerald-800/40">
+                  Instant Memory Hit
+                </span>
+              </div>
+              <p className="text-[11px] text-[#777] font-sans leading-relaxed">
+                الذاكرة السريعة تحفظ نتائج التسمية وتنسيق الأوصاف، لتعود النتيجة بـ 0ms وتوفر حصص Gemini API.
+              </p>
+            </div>
+
+            {/* 5. Ultrafast Parallel FFmpeg */}
+            <div className="bg-[#0c0c0c] border border-[#222] p-3 rounded-lg space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-[#eee] flex items-center gap-1.5 font-sans">
+                  <Sliders className="w-3.5 h-3.5 text-yellow-400" />
+                  <span>معالجة وسائط فائقة السرعة</span>
+                </span>
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-yellow-950/50 text-yellow-400 border border-yellow-800/40">
+                  FFmpeg Ultrafast
+                </span>
+              </div>
+              <p className="text-[11px] text-[#777] font-sans leading-relaxed">
+                توليد وضبط مقاسات الـ Thumbnail المتوافقة مع معايير تيليجرام بالتوازي التام (Parallel Promise Execution).
+              </p>
+            </div>
+
+            {/* 6. Asynchronous Non-blocking Storage */}
+            <div className="bg-[#0c0c0c] border border-[#222] p-3 rounded-lg space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-[#eee] flex items-center gap-1.5 font-sans">
+                  <Layers className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>تخزين غير معطل للقرص</span>
+                </span>
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-950/50 text-cyan-400 border border-cyan-800/40">
+                  Async Debounced I/O
+                </span>
+              </div>
+              <p className="text-[11px] text-[#777] font-sans leading-relaxed">
+                فصل عمليات كتابة الملفات عن مسار المعالجة الفعلي لضمان عدم توقف الطابور ولو لجزء من الثانية.
+              </p>
+            </div>
+
           </div>
         </div>
 

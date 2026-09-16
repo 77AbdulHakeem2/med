@@ -1,26 +1,83 @@
 import { UserSetting, ChunkProgress } from '../src/types';
+import { ensureMedPulseLinkInCaption } from './aiRenamer';
 
 /**
- * Strips forbidden words from a text string with word boundaries and cleanup
+ * Strips forbidden words from a text string with word boundaries and cleanup.
+ * Handles:
+ * - Literal match
+ * - Telegram handles (@handle, handle, t.me/handle, https://t.me/handle)
+ * - Flexible separators within handle/phrase (underscores, spaces, dashes)
+ * - Trailing/leading dashes, colons, pipes, and empty brackets/parentheses cleanup
  */
 export function removeForbiddenWords(text: string, forbiddenWords: string[]): string {
   if (!text || !forbiddenWords || forbiddenWords.length === 0) return text || '';
 
   let cleaned = text;
+
   for (const word of forbiddenWords) {
     if (!word || !word.trim()) continue;
-    const escaped = word.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // Match word or phrase ignoring case
-    const regex = new RegExp(escaped, 'gi');
-    cleaned = cleaned.replace(regex, '');
+    const trimmed = word.trim();
+
+    // 1. Literal escaped regex
+    const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    try {
+      cleaned = cleaned.replace(new RegExp(escaped, 'gi'), '');
+    } catch {
+      // ignore
+    }
+
+    // 2. Flexible regex for handles/phrases (e.g. @Medicine_Way2 matching @Medicine Way2, Medicine_Way2, t.me/Medicine_Way2)
+    const stripped = trimmed
+      .replace(/^@+/, '')
+      .replace(/^(?:https?:\/\/)?(?:www\.)?(?:t|telegram)\.(?:me|dog)\//i, '');
+
+    if (stripped.length > 0) {
+      const tokens = stripped.split(/[\s_\-.]+/).filter(Boolean);
+      if (tokens.length > 0) {
+        const tokenPattern = tokens
+          .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+          .join('[\\s_\\-.]+');
+
+        const fullPattern = `(?:(?:https?:\\/\\/)?(?:www\\.)?(?:t|telegram)\\.(?:me|dog)\\/|@)?${tokenPattern}`;
+        try {
+          cleaned = cleaned.replace(new RegExp(fullPattern, 'gi'), '');
+        } catch {
+          // ignore
+        }
+      }
+    }
   }
 
-  // Clean up dangling dashes, multiple spaces, etc.
+  // Post-stripping cleanup
+  // 1. Remove empty brackets, parentheses, braces leftover from tags
   cleaned = cleaned
-    .replace(/\s{2,}/g, ' ')
-    .replace(/-\s*-/g, '-')
-    .replace(/\s*-\s*$/g, '')
-    .replace(/^\s*-\s*/g, '')
+    .replace(/\[\s*\]/g, '')
+    .replace(/\(\s*\)/g, '')
+    .replace(/\{\s*\}/g, '');
+
+  // 2. Collapse multiple horizontal spaces within each line
+  cleaned = cleaned.replace(/[^\S\r\n]{2,}/g, ' ');
+
+  // 3. Clean up dangling duplicate separators
+  cleaned = cleaned
+    .replace(/\s*-\s*-\s*/g, ' - ')
+    .replace(/\s*\|\s*\|\s*/g, ' | ')
+    .replace(/\s*•\s*•\s*/g, ' • ');
+
+  // 4. Line-by-line cleanup of dangling leading/trailing punctuation
+  cleaned = cleaned
+    .split('\n')
+    .map((line) => {
+      let l = line.trim();
+      l = l.replace(/\s*[-|•~:,/]+\s*$/g, '');
+      l = l.replace(/^\s*[-|•~,/]+\s*/g, '');
+      return l.trim();
+    })
+    .filter((line, idx, arr) => {
+      if (line) return true;
+      return idx > 0 && arr[idx - 1] !== '';
+    })
+    .join('\n')
     .trim();
 
   return cleaned;
@@ -49,73 +106,97 @@ export function splitExtension(filename: string): { base: string; ext: string } 
  */
 export function processActualFilename(
   originalFilename: string,
-  userSetting: UserSetting
+  userSetting?: UserSetting | null
 ): string {
   if (!originalFilename) return 'file.mp4';
+  if (!userSetting) return originalFilename;
 
   const { base: rawBase, ext } = splitExtension(originalFilename);
 
   // 1. Remove forbidden words
-  let processedBase = removeForbiddenWords(rawBase, userSetting.forbiddenWords);
+  let processedBase = removeForbiddenWords(rawBase, userSetting.forbiddenWords || []);
 
   // 2. Apply Tag if configured
   if (userSetting.tag && userSetting.tag.text) {
     const tagText = userSetting.tag.text.trim();
     if (tagText) {
       if (userSetting.tag.position === 'before') {
-        processedBase = `${tagText} ${processedBase}`.trim();
+        if (!processedBase.startsWith(tagText)) {
+          processedBase = `${tagText} ${processedBase}`.trim();
+        }
       } else {
-        processedBase = `${processedBase} ${tagText}`.trim();
+        if (!processedBase.endsWith(tagText)) {
+          processedBase = `${processedBase} ${tagText}`.trim();
+        }
       }
     }
   }
 
   // 3. Apply Prefix & Suffix
   if (userSetting.namingPrefix && userSetting.namingPrefix.trim()) {
-    processedBase = `${userSetting.namingPrefix.trim()} ${processedBase}`.trim();
+    const prefix = userSetting.namingPrefix.trim();
+    if (!processedBase.startsWith(prefix)) {
+      processedBase = `${prefix} ${processedBase}`.trim();
+    }
   }
   if (userSetting.namingSuffix && userSetting.namingSuffix.trim()) {
-    processedBase = `${processedBase} ${userSetting.namingSuffix.trim()}`.trim();
+    const suffix = userSetting.namingSuffix.trim();
+    if (!processedBase.endsWith(suffix)) {
+      processedBase = `${processedBase} ${suffix}`.trim();
+    }
   }
+
+  // Final cleanup of spaces before extension
+  processedBase = processedBase.replace(/\s{2,}/g, ' ').trim();
 
   // 4. Return clean result with preserved extension
   return `${processedBase}${ext}`;
 }
 
 /**
- * Processes caption independently from filename:
- * 1. Scrubs forbidden words
- * 2. Applies Prefix / Suffix if specified
- * 3. Applies Tag if specified
- * Does NOT overwrite or force filename as caption.
+ * Processes caption comprehensively:
+ * 1. Combines filename and original caption so what came in the file's name and description is never lost
+ * 2. Scrubs forbidden words
+ * 3. Applies Prefix / Suffix if specified
+ * 4. Applies Tag if specified
+ * 5. Guarantees MedPulse link is properly embedded
  */
 export function processActualCaption(
   originalCaption: string | undefined,
-  userSetting: UserSetting
+  userSetting?: UserSetting | null,
+  filename?: string
 ): string {
-  if (!originalCaption || !originalCaption.trim()) {
-    // If original caption was empty, do not force filename into caption.
-    // Only apply user tag if configured.
+  const cleanFilename = (filename || '').replace(/\.[a-zA-Z0-9]{1,6}$/i, '').replace(/\s*\.m$/i, '').trim();
+  const rawCaption = (originalCaption || '').trim();
+
+  // Use original caption cleanly, or fall back to clean filename if caption is empty
+  let combined = rawCaption || cleanFilename;
+
+  if (!userSetting) {
+    return combined ? ensureMedPulseLinkInCaption(combined, 4096) : '';
+  }
+
+  if (!combined) {
     let emptyCaption = '';
     if (userSetting.tag && userSetting.tag.text) {
       emptyCaption = userSetting.tag.text.trim();
     }
-    return emptyCaption;
+    return emptyCaption ? ensureMedPulseLinkInCaption(emptyCaption, 4096) : '';
   }
 
-  // 1. Remove forbidden words from original caption
-  let cleaned = removeForbiddenWords(originalCaption.trim(), userSetting.forbiddenWords);
+  // 1. Remove forbidden words from caption text
+  let cleaned = removeForbiddenWords(combined, userSetting.forbiddenWords || []);
 
-  // 2. Apply Caption Prefix (or namingPrefix if captionPrefix is not set)
-  const prefix = (userSetting.captionPrefix || userSetting.namingPrefix || '').trim();
+  // 2. Apply Caption Prefix (if configured)
+  const prefix = (userSetting.captionPrefix || '').trim();
   if (prefix && !cleaned.startsWith(prefix)) {
-    cleaned = `${prefix} ${cleaned}`.trim();
+    cleaned = `${prefix}\n${cleaned}`.trim();
   }
 
-  // 3. Apply Caption Suffix (or namingSuffix if captionSuffix is not set)
-  const suffix = (userSetting.captionSuffix || userSetting.namingSuffix || '').trim();
+  // 3. Apply Caption Suffix (if configured)
+  const suffix = (userSetting.captionSuffix || '').trim();
   if (suffix && !cleaned.endsWith(suffix)) {
-    cleaned = `${cleaned} ${suffix}`.trim();
+    cleaned = `${cleaned}\n${suffix}`.trim();
   }
 
   // 4. Apply Tag if configured
@@ -130,7 +211,8 @@ export function processActualCaption(
     }
   }
 
-  return cleaned.trim();
+  const result = cleaned.trim();
+  return ensureMedPulseLinkInCaption(result, 4096);
 }
 
 /**

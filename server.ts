@@ -1,30 +1,39 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import multer from 'multer';
-import { createServer as createViteServer } from 'vite';
-import { store } from './server/store';
+import { store, isGeminiKey, isValidTelegramToken } from './server/store';
 import { TelegramService } from './server/telegram';
 import { queueWorker } from './server/queueWorker';
 import { FileProcessor } from './server/fileProcessor';
 import { batchAnalyzeAndRenameWithAI, InputBatchItem } from './server/aiRenamer';
+import { generateKeepAliveHtml } from './server/keepAliveHtml';
 import { SystemStatus } from './src/types';
 
-const PORT = 3000;
+// In AI Studio development, Nginx reverse proxy forwards external traffic from 8080 to internal port 3000.
+// In production deployments (Google Cloud Run, Render, etc.), the container MUST listen directly on process.env.PORT (e.g. 8080 on Cloud Run, 10000 on Render).
+const isAiStudioDev = fs.existsSync('/app/control-plane-api') && process.env.NODE_ENV !== 'production';
+const PORT = isAiStudioDev ? 3000 : (Number(process.env.PORT) || 3000);
 const upload = multer({ limits: { fileSize: 100 * 1024 * 1024 } });
 
 // Continuous, non-overlapping Long Polling for real Telegram Bot
 let isPollingActive = false;
 let lastUpdateId = 0;
+let consecutive409Count = 0;
 
 function startPollingLoop() {
   if (isPollingActive) return;
   isPollingActive = true;
 
   (async () => {
-    while (true) {
+    while (isPollingActive) {
       const config = store.getConfig();
-      if (!config.botToken || !config.pollingActive) {
-        await new Promise((r) => setTimeout(r, 1500));
+      const pollingEnv = process.env.ENABLE_TELEGRAM_POLLING;
+      const isEnvPollingDisabled = pollingEnv === 'false' || pollingEnv === '0';
+
+      if (!config.botToken || !config.pollingActive || isGeminiKey(config.botToken) || isEnvPollingDisabled) {
+        await new Promise((r) => setTimeout(r, 2000));
         continue;
       }
 
@@ -35,25 +44,53 @@ function startPollingLoop() {
           allowed_updates: ['message', 'callback_query'],
         });
 
-        if (res.ok && Array.isArray(res.result) && res.result.length > 0) {
-          for (const update of res.result) {
-            lastUpdateId = Math.max(lastUpdateId, update.update_id);
-            // Dispatch asynchronously so incoming updates & callback queries respond instantly without blocking the poller
-            TelegramService.handleUpdate(update).catch((err) => {
-              console.error('Update handling error:', err);
-            });
+        if (res.ok && Array.isArray(res.result)) {
+          consecutive409Count = 0;
+          if (res.result.length > 0) {
+            for (const update of res.result) {
+              lastUpdateId = Math.max(lastUpdateId, update.update_id);
+              // Dispatch asynchronously so incoming updates & callback queries respond instantly without blocking the poller
+              TelegramService.handleUpdate(update).catch((err) => {
+                console.error('Update handling error:', err);
+              });
+            }
           }
         } else if (!res.ok) {
           if (res.error_code === 409) {
-            console.warn('Telegram polling conflict (multiple instances). Waiting 3s...');
-            await new Promise((r) => setTimeout(r, 3000));
+            consecutive409Count++;
+            const desc = (res.description || '').toLowerCase();
+
+            // If a webhook was accidentally set on Telegram, remove it to resume getUpdates
+            if (desc.includes('webhook')) {
+              console.warn('Webhook was active on Telegram. Removing webhook to enable polling...');
+              try {
+                await TelegramService.callApi(config.botToken, 'deleteWebhook', { drop_pending_updates: false });
+              } catch (delErr) {
+                console.error('Failed to remove webhook:', delErr);
+              }
+              await new Promise((r) => setTimeout(r, 2000));
+              continue;
+            }
+
+            // Exponential backoff to resolve multi-instance conflict (e.g. Render production vs AI Studio dev)
+            // 5s -> 10s -> 20s -> 35s -> max 60s
+            const backoffMs = Math.min(60000, 5000 * Math.pow(1.5, Math.min(consecutive409Count - 1, 6)));
+
+            // Throttle logs so Cloud Run / Render logs aren't flooded
+            if (consecutive409Count === 1 || consecutive409Count % 5 === 0) {
+              console.warn(`Telegram polling notice: Another bot instance (e.g. on Render or AI Studio) is actively receiving updates. Backing off for ${Math.round(backoffMs / 1000)}s to avoid conflicts.`);
+            }
+            await new Promise((r) => setTimeout(r, backoffMs));
+          } else if (res.error_code === 401 || res.error_code === 404) {
+            console.warn('Telegram polling unauthorized/not found. Pausing 10s...');
+            await new Promise((r) => setTimeout(r, 10000));
           } else {
-            await new Promise((r) => setTimeout(r, 1000));
+            await new Promise((r) => setTimeout(r, 2000));
           }
         }
-      } catch (err) {
-        console.error('Polling network error:', err);
-        await new Promise((r) => setTimeout(r, 2000));
+      } catch (err: any) {
+        console.error('Polling network error:', err?.message || err);
+        await new Promise((r) => setTimeout(r, 4000));
       }
     }
   })();
@@ -65,20 +102,79 @@ async function startServer() {
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
+  // Keep-Alive & Ping Metrics for UptimeRobot and Render
+  let totalKeepAlivePings = 0;
+  let lastKeepAlivePingTime = 'لم يتم استقبال أي استدعاء بعد';
+
   // Start background Queue Worker
   queueWorker.start();
   startPollingLoop();
 
   // ----------------------------------------------------
-  // API Routes
+  // Keep-Alive, Liveness & Uptime Monitoring Routes
+  // (Works seamlessly for UptimeRobot, Render Health Probes & Browsers)
   // ----------------------------------------------------
+  app.all(['/health', '/uptime', '/ping', '/keep-alive', '/api/health'], (req, res) => {
+    if (req.method === 'HEAD') {
+      res.status(200).end();
+      return;
+    }
+
+    totalKeepAlivePings++;
+    lastKeepAlivePingTime = new Date().toISOString();
+
+    const isJsonRequested =
+      req.query.json === 'true' ||
+      req.query.format === 'json' ||
+      req.path === '/api/health' ||
+      req.headers.accept?.includes('application/json') ||
+      Boolean(req.headers['user-agent']?.match(/uptimerobot|pingdom|curl|wget|bot/i));
+
+    const config = store.getConfig();
+    const queue = store.getQueue();
+    const mem = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+
+    if (isJsonRequested) {
+      res.status(200).json({
+        status: 'ok',
+        service: 'Telegram Auto-Publisher & Media Pipeline',
+        environment: process.env.RENDER ? 'Render Cloud (Node.js)' : 'AI Studio Container',
+        uptimeSeconds: Math.floor(process.uptime()),
+        timestamp: lastKeepAlivePingTime,
+        pingsReceived: totalKeepAlivePings,
+        bot: {
+          configured: !!config.botToken && !isGeminiKey(config.botToken),
+          pollingActive: config.pollingActive && process.env.ENABLE_TELEGRAM_POLLING !== 'false',
+        },
+        queueLength: queue.length,
+        memoryUsageMb: mem,
+        keepAlive: 'active',
+      });
+      return;
+    }
+
+    // Render interactive HTML dashboard for browser visits
+    const html = generateKeepAliveHtml({
+      uptimeSeconds: Math.floor(process.uptime()),
+      environment: process.env.RENDER ? 'Render Cloud (Node.js)' : 'AI Studio Container',
+      botConfigured: !!config.botToken && !isGeminiKey(config.botToken),
+      botUsername: undefined,
+      pollingActive: config.pollingActive && process.env.ENABLE_TELEGRAM_POLLING !== 'false',
+      queueLength: queue.length,
+      totalPings: totalKeepAlivePings,
+      lastPingTime: lastKeepAlivePingTime,
+      memoryUsageMb: mem,
+    });
+
+    res.status(200).type('html').send(html);
+  });
 
   // System Status
   app.get('/api/status', async (req, res) => {
     const config = store.getConfig();
     let botInfo = null;
 
-    if (config.botToken) {
+    if (config.botToken && !isGeminiKey(config.botToken)) {
       const meRes = await TelegramService.getMe(config.botToken);
       if (meRes.ok && meRes.result) {
         botInfo = meRes.result;
@@ -89,7 +185,7 @@ async function startServer() {
     const activeProcessing = queue.find((q) => q.status !== 'queued' && q.status !== 'published' && q.status !== 'failed');
 
     const status: SystemStatus = {
-      botConfigured: !!config.botToken,
+      botConfigured: !!config.botToken && !isGeminiKey(config.botToken),
       botInfo,
       pollingActive: config.pollingActive,
       webhookActive: !!config.webhookUrl,
@@ -109,19 +205,34 @@ async function startServer() {
   // Bot Config: get current configuration
   app.get('/api/bot/config', (req, res) => {
     const config = store.getConfig();
+    const envToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+    const isFromSecret = isValidTelegramToken(envToken);
+    const hasGeminiKeyConflict = isGeminiKey(envToken);
+
     res.json({
       botToken: config.botToken,
       pollingActive: config.pollingActive,
       webhookUrl: config.webhookUrl,
       aiRenaming: config.aiRenaming,
-      isConfigured: !!config.botToken,
+      turboSpeed: config.turboSpeed,
+      isConfigured: !!config.botToken && !isGeminiKey(config.botToken),
+      isFromSecret,
+      hasGeminiKeyConflict,
     });
   });
 
-  // Bot Config: save token, AI preferences & toggle polling
+  // Bot Config: save token, AI preferences, turbo speed & toggle polling
   app.post('/api/bot/config', async (req, res) => {
-    const { botToken, pollingActive, webhookUrl, aiRenaming } = req.body;
+    const { botToken, pollingActive, webhookUrl, aiRenaming, turboSpeed } = req.body;
     const current = store.getConfig();
+
+    if (botToken !== undefined && isGeminiKey(botToken)) {
+      return res.json({
+        success: false,
+        verified: false,
+        error: '⚠️ هذا الرمز يبدو كرمز Google Gemini API (يبدأ بـ AIza) وليس توكن بوت تيليجرام. رمز التيليجرام يبدأ بأرقام مثل 123456789:AA... ويتم إنشاؤه عبر @BotFather.',
+      });
+    }
 
     const update: any = {};
     if (botToken !== undefined) {
@@ -134,6 +245,18 @@ async function startServer() {
     if (pollingActive !== undefined) update.pollingActive = !!pollingActive;
     if (webhookUrl !== undefined) update.webhookUrl = webhookUrl.trim();
     if (aiRenaming !== undefined) update.aiRenaming = aiRenaming;
+    if (turboSpeed !== undefined) {
+      update.turboSpeed = {
+        ...(current.turboSpeed || {
+          enabled: true,
+          fastStatusUpdates: true,
+          preloadNextItem: true,
+          aiCacheEnabled: true,
+          ultrafastFfmpeg: true,
+        }),
+        ...turboSpeed,
+      };
+    }
 
     store.updateConfig(update);
     const updatedConfig = store.getConfig();
@@ -144,13 +267,13 @@ async function startServer() {
     let errorDesc = '';
 
     const tokenToTest = updatedConfig.botToken;
-    if (tokenToTest) {
+    if (tokenToTest && !isGeminiKey(tokenToTest)) {
       const meRes = await TelegramService.getMe(tokenToTest);
       if (meRes.ok && meRes.result) {
         verified = true;
         botUser = meRes.result;
       } else {
-        errorDesc = meRes.description || 'فشل الاتصال برمز البوت';
+        errorDesc = meRes.description || 'فشل الاتصال برمز البوت: يرجى التأكد من الرمز';
       }
     }
 
@@ -328,17 +451,23 @@ async function startServer() {
     }
 
     const created = items.map((it: any) => {
+      const isVideo = it.type === 'video';
+      const isAudio = it.type === 'audio';
+      const defaultFilename = isVideo ? 'Video.mp4' : (isAudio ? 'Audio.mp3' : 'Document.pdf');
+      const defaultMime = isVideo ? 'video/mp4' : (isAudio ? 'audio/mpeg' : 'application/octet-stream');
       return store.addToQueue({
         id: `q_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         userId: user.userId,
         userFirstName: user.firstName,
         chatId: user.userId,
         type: it.type || 'video',
-        originalFilename: it.originalFilename || (it.type === 'text' ? undefined : 'Video.mp4'),
+        originalFilename: it.originalFilename || (it.type === 'text' ? undefined : defaultFilename),
         originalCaption: it.originalCaption || '',
         textContent: it.textContent,
-        fileSize: it.fileSize || 45 * 1024 * 1024,
-        mimeType: it.type === 'text' ? undefined : 'video/mp4',
+        performer: it.performer,
+        title: it.title,
+        fileSize: it.fileSize || (isAudio ? 12 * 1024 * 1024 : 45 * 1024 * 1024),
+        mimeType: it.type === 'text' ? undefined : (it.mimeType || defaultMime),
         status: 'queued',
         statusMessage: 'في قائمة الانتظار',
         targetChannelId: user.channel?.chatId || '@MediaHubArabic',
@@ -407,6 +536,33 @@ async function startServer() {
         duration: 120,
       };
       fakeMessage.caption = caption;
+    } else if (type === 'audio') {
+      fakeMessage.audio = {
+        file_id: 'fake_audio_id',
+        file_name: filename || 'Sample_Audio.mp3',
+        mime_type: 'audio/mpeg',
+        file_size: fileSize || 12 * 1024 * 1024,
+        duration: 180,
+        performer: req.body.performer || '',
+        title: req.body.title || '',
+      };
+      fakeMessage.caption = caption;
+    } else if (type === 'voice') {
+      fakeMessage.voice = {
+        file_id: 'fake_voice_id',
+        mime_type: 'audio/ogg',
+        file_size: fileSize || 2 * 1024 * 1024,
+        duration: 45,
+      };
+      fakeMessage.caption = caption;
+    } else if (type === 'document') {
+      fakeMessage.document = {
+        file_id: 'fake_doc_id',
+        file_name: filename || 'Sample_Document.pdf',
+        mime_type: 'application/pdf',
+        file_size: fileSize || 10 * 1024 * 1024,
+      };
+      fakeMessage.caption = caption;
     }
 
     // Add to simulated chat history
@@ -461,25 +617,48 @@ async function startServer() {
   });
 
   // ----------------------------------------------------
-  // Vite Integration
+  // Static Production Serving vs Vite Dev Middleware
   // ----------------------------------------------------
-  if (process.env.NODE_ENV !== 'production') {
+  const distPath = path.join(process.cwd(), 'dist');
+  const hasDist = fs.existsSync(path.join(distPath, 'index.html'));
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    (hasDist && !process.env.npm_lifecycle_event?.includes('dev') && !process.argv[1]?.endsWith('server.ts'));
+
+  if (!isProduction) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Telegram Bot Pipeline Server running on http://0.0.0.0:${PORT}`);
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Telegram Bot Pipeline Server running on http://0.0.0.0:${PORT} [mode: ${isProduction ? 'production' : 'development'}]`);
   });
+
+  // Graceful shutdown on Cloud Run container rotation / SIGTERM
+  const handleShutdown = (signal: string) => {
+    console.log(`Received ${signal}, shutting down gracefully...`);
+    isPollingActive = false;
+    try {
+      queueWorker.stop();
+    } catch {}
+    server.close(() => {
+      console.log('HTTP server closed.');
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 4000).unref();
+  };
+
+  process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+  process.on('SIGINT', () => handleShutdown('SIGINT'));
 }
 
 startServer();

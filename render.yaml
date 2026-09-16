@@ -1,0 +1,21 @@
+# Render Blueprint Specification (render.yaml)
+# Enables one-click deploy on Render Web Services
+services:
+  - type: web
+    name: telegram-auto-publisher
+    runtime: node
+    plan: free
+    region: frankfurt # Low latency to Europe/Middle East
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 22.14.0
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ENABLE_TELEGRAM_POLLING
+        value: "true"

@@ -117,9 +117,20 @@ export const BotConnectModal: React.FC<BotConnectModalProps> = ({
               className="w-full bg-[#0a0a0a] border border-[#282828] rounded px-3 py-2 text-xs text-[#e0e0e0] font-mono focus:outline-none focus:border-sky-500/60"
               dir="ltr"
             />
+            {tokenInput.trim().startsWith('AIza') && (
+              <div className="mt-2 p-2.5 rounded bg-amber-950/40 border border-amber-800/60 text-amber-300 text-[11px] font-sans flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" />
+                <span>
+                  ⚠️ <b>تنبيه:</b> يبدو أن هذا الرمز هو مفتاح Google Gemini API وليس توكن تيليجرام. توكن تيليجرام يبدأ بأرقام مثل <code>7529022034:AA...</code> ويتم إنشاؤه عبر <b>@BotFather</b>.
+                </span>
+              </div>
+            )}
             <div className="mt-2 flex items-center gap-1.5 text-[11px] text-emerald-400/90 font-sans bg-emerald-950/20 border border-emerald-800/30 p-2 rounded">
               <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
-              <span>يتم حفظ هذا الرمز تلقائياً ودائماً في بيئة التشغيل، ولن تضطر لإعادة إدخاله عند العمليات القادمة.</span>
+              <span>يتم حفظ هذا الرمز تلقائياً ودائماً في قاعدة البيانات وبيئة التشغيل، ولن تضطر لإعادة إدخاله عند العمليات القادمة.</span>
+            </div>
+            <div className="mt-1.5 text-[10px] text-sky-400/80 bg-sky-950/20 border border-sky-800/30 p-2 rounded font-sans leading-relaxed">
+              🔐 <b>لحفظ التوكن في إعدادات الأداة (Secret):</b> يمكنك إدخاله أيضاً في قائمة <b>Settings (⚙️)</b> العلوية الخاصة بأداة AI Studio تحت اسم <code className="font-mono text-white">TELEGRAM_BOT_TOKEN</code> ليتم ربطه تلقائياً حتى مع أي إعادة تشغيل كاملة.
             </div>
             <p className="text-[10px] text-[#777] mt-1 font-sans">
               يمكنك الحصول على التوكن مجاناً من خلال التحدث مع <b className="text-sky-400 font-mono">@BotFather</b> داخل التيليجرام وإنشاء بوت جديد عبر أمر <code className="text-amber-400 font-mono">/newbot</code>.

@@ -181,6 +181,13 @@ export const QueueInspector: React.FC<QueueInspectorProps> = ({
             FAILED
           </span>
         );
+      case 'ready_to_publish':
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-mono uppercase tracking-wider bg-amber-950/40 text-amber-300 border border-amber-800/40 animate-pulse">
+            <Clock className="w-3 h-3 text-amber-400" />
+            WAITING FIFO ORDER ⏸️
+          </span>
+        );
       case 'queued':
         return (
           <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-mono uppercase tracking-wider bg-[#181818] text-[#888] border border-[#2a2a2a]">
@@ -462,15 +469,35 @@ export const QueueInspector: React.FC<QueueInspectorProps> = ({
                           VIDEO
                         </span>
                       )}
+                      {item.type === 'audio' && (
+                        <span className="text-[10px] font-mono uppercase tracking-wider bg-emerald-950/30 text-emerald-400 px-1.5 py-0.2 rounded border border-emerald-800/40">
+                          AUDIO
+                        </span>
+                      )}
+                      {item.type === 'document' && (
+                        <span className="text-[10px] font-mono uppercase tracking-wider bg-blue-950/30 text-blue-400 px-1.5 py-0.2 rounded border border-blue-800/40">
+                          DOCUMENT
+                        </span>
+                      )}
                       {item.type === 'text' && (
                         <span className="text-[10px] font-mono uppercase tracking-wider bg-amber-950/30 text-amber-400 px-1.5 py-0.2 rounded border border-amber-800/40">
                           STANDALONE_TEXT
+                        </span>
+                      )}
+                      {item.performer && (
+                        <span className="text-[10px] font-mono bg-[#181818] text-emerald-300 px-1.5 py-0.2 rounded border border-[#2a2a2a]">
+                          🎤 {item.performer}
                         </span>
                       )}
                       {item.isAiRenamed && (
                         <span className="text-[10px] font-mono uppercase tracking-wider bg-amber-950/40 text-amber-300 px-1.5 py-0.2 rounded border border-amber-800/50 flex items-center gap-1">
                           <Sparkles className="w-2.5 h-2.5 text-amber-400" />
                           AI_BATCH_UNIFIED
+                        </span>
+                      )}
+                      {typeof item.sourceMessageId === 'number' && (
+                        <span className="text-[10px] font-mono uppercase tracking-wider bg-violet-950/40 text-violet-300 px-1.5 py-0.2 rounded border border-violet-800/50">
+                          SRC_MSG #{item.sourceMessageId}
                         </span>
                       )}
                     </div>
@@ -490,6 +517,12 @@ export const QueueInspector: React.FC<QueueInspectorProps> = ({
 
                     <div className="flex items-center gap-2 mt-1 text-[11px] text-[#666] font-mono flex-wrap">
                       <span>USER: {item.userFirstName}</span>
+                      {item.sourceChannelTitle && (
+                        <>
+                          <span>•</span>
+                          <span className="text-violet-400">SRC: {item.sourceChannelTitle}</span>
+                        </>
+                      )}
                       <span>•</span>
                       <span>TARGET: {item.targetChannelTitle}</span>
                       {item.fileSize && (
@@ -650,6 +683,15 @@ export const QueueInspector: React.FC<QueueInspectorProps> = ({
                             dir="auto"
                           />
                         </div>
+
+                        {item.formattedCaption && (
+                          <div className="bg-[#0c0c0c] p-2.5 rounded border border-rose-950/30 text-[10px] font-mono text-[#aaa] whitespace-pre-line leading-relaxed" dir="auto">
+                            <span className="text-rose-400/90 font-semibold block mb-1 text-[10px] flex items-center gap-1">
+                              <span>📝 الكابشن وفق النمط المعتمد:</span>
+                            </span>
+                            {item.formattedCaption.replace(/<[^>]*>?/gm, '')}
+                          </div>
+                        )}
 
                         {item.groupingReason && (
                           <div className="text-[11px] text-[#777] font-sans flex items-center gap-1.5">

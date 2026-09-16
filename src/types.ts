@@ -34,13 +34,24 @@ export interface UserSetting {
   captionSuffix: string;
   channel?: UserChannelSetting;
   pendingAction?: {
-    type: 'awaiting_tag_text' | 'awaiting_channel' | 'awaiting_forbidden_word' | 'awaiting_prefix' | 'awaiting_suffix' | 'awaiting_thumbnail';
+    type:
+      | 'awaiting_tag_text'
+      | 'awaiting_channel'
+      | 'awaiting_forbidden_word'
+      | 'awaiting_prefix'
+      | 'awaiting_suffix'
+      | 'awaiting_caption_prefix'
+      | 'awaiting_caption_suffix'
+      | 'awaiting_thumbnail'
+      | 'awaiting_ai_pattern'
+      | 'awaiting_ai_instructions'
+      | 'awaiting_custom_caption_template';
     data?: Record<string, any>;
   };
   updatedAt: number;
 }
 
-export type QueueItemType = 'video' | 'document' | 'text';
+export type QueueItemType = 'video' | 'audio' | 'document' | 'text';
 
 export type QueueItemStatus =
   | 'queued'
@@ -51,6 +62,7 @@ export type QueueItemStatus =
   | 'renaming'
   | 'processing_caption'
   | 'completed_processing'
+  | 'ready_to_publish'
   | 'uploading'
   | 'published'
   | 'failed';
@@ -77,6 +89,8 @@ export interface QueueItem {
   duration?: number;
   width?: number;
   height?: number;
+  performer?: string;
+  title?: string;
   originalFilename?: string;
   originalCaption?: string;
   processedFilename?: string;
@@ -92,6 +106,11 @@ export interface QueueItem {
   statusTelegramMessageId?: number;
   targetChannelId?: string;
   targetChannelTitle?: string;
+  sourceChannelId?: string | number;
+  sourceChannelTitle?: string;
+  sourceMessageId?: number;
+  forwardDate?: number;
+  mediaGroupId?: string;
   chunkProgress?: ChunkProgress;
   isAiRenamed?: boolean;
   aiGroupingReason?: string;
@@ -113,6 +132,7 @@ export interface ChannelPost {
   duration?: number;
   width?: number;
   height?: number;
+  performer?: string;
   title?: string;
   filename?: string;
   caption?: string;
@@ -143,6 +163,51 @@ export interface CaptionStylePreset {
   template: string;
 }
 
+export const CAPTION_STYLE_PRESETS: CaptionStylePreset[] = [
+  {
+    id: 'medpulse_box',
+    name: 'النمط الرسمي المعتمد (MedPulse Box)',
+    badge: 'الافتراضي المعتمد 👑',
+    description: 'إطار خطي فخم، اسم الدكتور بجانب MedPulse، الموضوع، ومعرف القناة بجانب الهاشتاق.',
+    template: `━━━━━━━━━━━━━━━\n📕 Name :\n{medpulse_link} | {doctor}\n━━━━━━━━━━━━━━━\n📌 Topic\n{topic}\n━━━━━━━━━━━━━━━\n@MedPulseVIP | #{hashtag}`,
+  },
+  {
+    id: 'academic_badges',
+    name: 'النمط الأكاديمي الشامل (Academic Badges)',
+    badge: 'منظم وتفصيلي 📚',
+    description: 'توزيع منظم بأيقونات طبية وأكاديمية للمادة، المحاضر، العنوان ورقم الجزء.',
+    template: `🩺 {medpulse_link}\n━━━━━━━━━━━━━━━━━━\n📚 المادة: {subject}\n👨‍⚕️ الدكتور: {doctor}\n📑 المحاضرة: {topic}\n🔢 الجزء: {part}\n━━━━━━━━━━━━━━━━━━\n📢 القناة: @MedPulseVIP\n#{hashtag}`,
+  },
+  {
+    id: 'modern_minimal',
+    name: 'النمط العصري الهادئ (Modern Minimal)',
+    badge: 'هادئ وأنيق ✨',
+    description: 'خطوط هادئة ونقاط ناعمة بدون فواصل عريضة، ممتاز للقراءة السلسة.',
+    template: `{medpulse_link} | {subject}\n▪️ المحاضر: {doctor}\n▫️ الموضوع: {topic} {part}\n\n🔗 @MedPulseVIP • #{hashtag}`,
+  },
+  {
+    id: 'compact_bullets',
+    name: 'النمط الهندسي المركز (Compact Bullets)',
+    badge: 'هندسي ومركّز ◈',
+    description: 'نقاط هندسية واضحة وخط فاصل رفيع، خفيف ومنظم.',
+    template: `◈ {medpulse_link} ◈\n▸ الكورس: {subject}\n▸ الدكتور: {doctor}\n▸ العنوان: {topic} {part}\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n@MedPulseVIP • #{hashtag}`,
+  },
+  {
+    id: 'single_line_clean',
+    name: 'النمط المختصر والسريع (Direct Short)',
+    badge: 'موجز وسريع ⚡',
+    description: 'صيغة سريعة بدون تفاصيل إضافية لتوفير المساحة في القنوات المزدحمة.',
+    template: `{medpulse_link} • {subject}\n{doctor} — {topic} {part}\n@MedPulseVIP • #{hashtag}`,
+  },
+  {
+    id: 'custom',
+    name: 'قالب مخصص بالكامل (Custom Template)',
+    badge: 'حرية كاملة ✏️',
+    description: 'اكتب نمطك الخاص واستخدم المتغيرات الذكية: {subject}, {doctor}, {topic}, {part}, #{hashtag}, {channel}, {medpulse_link}.',
+    template: '',
+  },
+];
+
 export interface AIRenamingConfig {
   enabled: boolean;
   namingPattern: string;
@@ -165,11 +230,22 @@ export interface AIRenamedItemResult {
   groupingReason?: string;
 }
 
+export interface TurboSpeedConfig {
+  enabled: boolean;
+  fastStatusUpdates: boolean;
+  preloadNextItem: boolean;
+  enableCache: boolean;
+  cloudDirectDispatch: boolean;
+  maxConcurrency: number;
+  mtprotoWorkers: number;
+}
+
 export interface BotConfig {
   botToken: string;
   pollingActive: boolean;
   webhookUrl: string;
   aiRenaming: AIRenamingConfig;
+  turboSpeed?: TurboSpeedConfig;
 }
 
 export interface SystemStatus {
@@ -185,6 +261,7 @@ export interface SystemStatus {
   lastActiveTime: number;
   resumableTransfersCount: number;
   aiRenaming?: AIRenamingConfig;
+  turboSpeed?: TurboSpeedConfig;
 }
 
 export interface InlineKeyboardButton {

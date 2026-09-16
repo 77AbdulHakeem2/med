@@ -5,6 +5,7 @@ import { QueueInspector } from './components/QueueInspector';
 import { ChannelFeed } from './components/ChannelFeed';
 import { SettingsManager } from './components/SettingsManager';
 import { BotConnectModal } from './components/BotConnectModal';
+import { RenderDeployModal } from './components/RenderDeployModal';
 import {
   UserSetting,
   QueueItem,
@@ -24,6 +25,7 @@ export default function App() {
   const [messages, setMessages] = useState<SimulatedTelegramMessage[]>([]);
 
   const [showBotModal, setShowBotModal] = useState(false);
+  const [showRenderModal, setShowRenderModal] = useState(false);
   const [loadingAction, setLoadingAction] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -124,6 +126,24 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId: activeUserId, type: 'video', filename, fileSize, caption }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setMessages(data.messages || []);
+        await fetchData();
+      }
+    } finally {
+      setLoadingAction(false);
+    }
+  };
+
+  const handleSendAudio = async (filename: string, fileSize: number, caption?: string, performer?: string, title?: string) => {
+    setLoadingAction(true);
+    try {
+      const res = await fetch('/api/simulator/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: activeUserId, type: 'audio', filename, fileSize, caption, performer, title }),
       });
       if (res.ok) {
         const data = await res.json();
@@ -295,6 +315,7 @@ export default function App() {
         activeUserId={activeUserId}
         onSelectUser={setActiveUserId}
         onOpenBotConfig={() => setShowBotModal(true)}
+        onOpenRenderModal={() => setShowRenderModal(true)}
         activeTab={activeTab}
         onChangeTab={setActiveTab}
         onRefresh={handleManualRefresh}
@@ -310,6 +331,7 @@ export default function App() {
             onSendMessage={handleSendMessage}
             onSendPhoto={handleSendPhoto}
             onSendVideo={handleSendVideo}
+            onSendAudio={handleSendAudio}
             onSendBatch={handleSendBatch}
             onCallbackQuery={handleCallbackQuery}
             loading={loadingAction}
@@ -365,6 +387,17 @@ export default function App() {
           onSaveConfig={handleSaveBotConfig}
         />
       )}
+
+      {/* Render 24/7 & UptimeRobot Keep-Alive Modal */}
+      <RenderDeployModal
+        isOpen={showRenderModal}
+        onClose={() => setShowRenderModal(false)}
+        pollingActive={status?.pollingActive ?? false}
+        onTogglePolling={async () => {
+          if (!status) return;
+          await handleSaveBotConfig(status.botInfo?.username || '', !status.pollingActive);
+        }}
+      />
     </div>
   );
 }

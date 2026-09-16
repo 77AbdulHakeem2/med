@@ -2,6 +2,8 @@ import React from 'react';
 import {
   Eye,
   FileVideo,
+  Music,
+  FileText,
   CheckCircle2,
   Calendar,
   Sparkles,
@@ -142,7 +144,13 @@ export const ChannelFeed: React.FC<ChannelFeedProps> = ({ posts, channelSetting 
                     <div className="bg-[#0d0d0d] border border-emerald-800/40 p-3 rounded flex items-center justify-between gap-3 font-mono">
                       <div className="flex items-center gap-2.5 min-w-0">
                         <div className="p-1.5 rounded bg-emerald-950/40 text-emerald-400 border border-emerald-800/30 shrink-0">
-                          <FileVideo className="w-4 h-4" />
+                          {post.type === 'audio' ? (
+                            <Music className="w-4 h-4" />
+                          ) : post.type === 'document' ? (
+                            <FileText className="w-4 h-4" />
+                          ) : (
+                            <FileVideo className="w-4 h-4" />
+                          )}
                         </div>
                         <div className="min-w-0">
                           <span className="text-[9px] text-emerald-400 uppercase tracking-widest block">
@@ -151,6 +159,11 @@ export const ChannelFeed: React.FC<ChannelFeedProps> = ({ posts, channelSetting 
                           <span className="text-xs sm:text-sm font-bold text-[#f0f0f0] truncate block" dir="ltr">
                             {post.filename || post.title}
                           </span>
+                          {post.performer && (
+                            <span className="text-[10px] text-emerald-300 font-sans block mt-0.5">
+                              الفنان / المنشد: {post.performer}
+                            </span>
+                          )}
                         </div>
                       </div>
                       <span className="text-[10px] bg-emerald-950/40 text-emerald-400 border border-emerald-800/40 px-2 py-0.5 rounded font-semibold whitespace-nowrap">

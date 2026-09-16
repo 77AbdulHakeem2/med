@@ -17,6 +17,7 @@ interface HeaderProps {
   activeUserId: string;
   onSelectUser: (userId: string) => void;
   onOpenBotConfig: () => void;
+  onOpenRenderModal: () => void;
   activeTab: 'simulator' | 'queue' | 'channel' | 'settings';
   onChangeTab: (tab: 'simulator' | 'queue' | 'channel' | 'settings') => void;
   onRefresh: () => void;
@@ -29,6 +30,7 @@ export const Header: React.FC<HeaderProps> = ({
   activeUserId,
   onSelectUser,
   onOpenBotConfig,
+  onOpenRenderModal,
   activeTab,
   onChangeTab,
   onRefresh,
@@ -150,6 +152,16 @@ export const Header: React.FC<HeaderProps> = ({
                 ))}
               </select>
             </div>
+
+            {/* Render 24/7 & UptimeRobot Keep-Alive Modal Button */}
+            <button
+              onClick={onOpenRenderModal}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-mono transition border bg-sky-950/20 text-sky-400 border-sky-800/40 hover:bg-sky-950/40 hover:border-sky-500/60"
+              title="تشغيل الاستضافة 24/7 عبر Render و UptimeRobot"
+            >
+              <Activity className="w-3.5 h-3.5 text-sky-400" />
+              <span className="hidden sm:inline">RENDER 24/7</span>
+            </button>
 
             {/* Telegram Bot Token Status / Connect */}
             <button
