@@ -296,7 +296,7 @@ export class FileProcessor {
           const startTime = Date.now();
           const res = await fetch(downloadUrl);
           if (res.ok && res.body) {
-            const writeStream = fs.createWriteStream(localDownloadPath, { highWaterMark: 1024 * 1024 });
+            const writeStream = fs.createWriteStream(localDownloadPath, { highWaterMark: 4 * 1024 * 1024 });
             let downloadedBytes = 0;
             const totalBytes = Number(res.headers.get('content-length')) || 0;
             let lastReportTime = 0;
@@ -431,7 +431,7 @@ export class FileProcessor {
 
         // Priority 1: Map streams cleanly with attached_pic disposition and faststart
         try {
-          const cmd = `ffmpeg -threads 2 -y -i "${inputPath}" -i "${thumbPath}" -map 0:v:0 -map 0:a? -map 0:s? -map 1:v:0 -c copy -disposition:v:0 default -disposition:v:1 attached_pic ${movflags} "${outputPath}"`;
+          const cmd = `ffmpeg -threads 4 -y -i "${inputPath}" -i "${thumbPath}" -map 0:v:0 -map 0:a? -map 0:s? -map 1:v:0 -c copy -disposition:v:0 default -disposition:v:1 attached_pic ${movflags} "${outputPath}"`;
           await execAsync(cmd, { timeout: ffmpegTimeout });
           if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
             embedSuccess = true;
@@ -443,7 +443,7 @@ export class FileProcessor {
         // Priority 2: General map 0 map 1 stream copy
         if (!embedSuccess) {
           try {
-            const cmd = `ffmpeg -threads 2 -y -i "${inputPath}" -i "${thumbPath}" -map 0 -map 1 -c copy -disposition:v:1 attached_pic "${outputPath}"`;
+            const cmd = `ffmpeg -threads 4 -y -i "${inputPath}" -i "${thumbPath}" -map 0 -map 1 -c copy -disposition:v:1 attached_pic "${outputPath}"`;
             await execAsync(cmd, { timeout: ffmpegTimeout });
             if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
               embedSuccess = true;
@@ -455,20 +455,20 @@ export class FileProcessor {
 
         // Fallback: Copy original if embedding failed (thumbnail is still passed to Telegram multipart & MTProto)
         if (!embedSuccess) {
-          fs.copyFileSync(inputPath, outputPath);
+          await fs.promises.copyFile(inputPath, outputPath);
         }
       } else if (isAudio && thumbPath && fs.existsSync(thumbPath) && fs.statSync(thumbPath).size > 0) {
         try {
-          // Embed image as cover art in audio file (MP3 ID3v2 / M4A) with 2 threads
-          const cmd = `ffmpeg -threads 2 -y -i "${inputPath}" -i "${thumbPath}" -map 0:a -map 1 -c:a copy -c:v mjpeg -id3v2_version 3 -metadata:s:v title="Album cover" -metadata:s:v comment="Cover (front)" "${outputPath}"`;
+          // Embed image as cover art in audio file (MP3 ID3v2 / M4A) with 4 threads
+          const cmd = `ffmpeg -threads 4 -y -i "${inputPath}" -i "${thumbPath}" -map 0:a -map 1 -c:a copy -c:v mjpeg -id3v2_version 3 -metadata:s:v title="Album cover" -metadata:s:v comment="Cover (front)" "${outputPath}"`;
           await execAsync(cmd, { timeout: ffmpegTimeout });
         } catch (ffmpegAudioErr) {
           console.warn('ffmpeg audio thumbnail embed fallback, copying file with new name:', ffmpegAudioErr);
-          fs.copyFileSync(inputPath, outputPath);
+          await fs.promises.copyFile(inputPath, outputPath);
         }
       } else {
-        // Just copy with the exact new renamed filename
-        fs.copyFileSync(inputPath, outputPath);
+        // Just copy with the exact new renamed filename asynchronously to avoid event-loop blocking
+        await fs.promises.copyFile(inputPath, outputPath);
       }
 
       // Verify output file

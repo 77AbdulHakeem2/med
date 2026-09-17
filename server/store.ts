@@ -60,6 +60,8 @@ class Store {
         maxConcurrency: 16,
         mtprotoWorkers: 16,
       },
+      apiId: Number(process.env.TELEGRAM_API_ID) || 6,
+      apiHash: process.env.TELEGRAM_API_HASH || 'eb06d4abfb49dc3eeb1aeb98ae0f581e',
     },
     users: {},
     queue: [],

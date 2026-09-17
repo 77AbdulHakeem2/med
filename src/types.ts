@@ -240,12 +240,24 @@ export interface TurboSpeedConfig {
   mtprotoWorkers: number;
 }
 
+export interface UserAccountInfo {
+  connected: boolean;
+  phone?: string;
+  firstName?: string;
+  lastName?: string;
+  username?: string;
+  userId?: number;
+  isPremium?: boolean;
+}
+
 export interface BotConfig {
   botToken: string;
   pollingActive: boolean;
   webhookUrl: string;
   aiRenaming: AIRenamingConfig;
   turboSpeed?: TurboSpeedConfig;
+  apiId?: number;
+  apiHash?: string;
 }
 
 export interface SystemStatus {
@@ -262,6 +274,7 @@ export interface SystemStatus {
   resumableTransfersCount: number;
   aiRenaming?: AIRenamingConfig;
   turboSpeed?: TurboSpeedConfig;
+  userAccount?: UserAccountInfo;
 }
 
 export interface InlineKeyboardButton {

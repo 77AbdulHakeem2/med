@@ -27,6 +27,7 @@ import {
   Rocket,
 } from 'lucide-react';
 import { UserSetting, AIRenamingConfig, CAPTION_STYLE_PRESETS } from '../types';
+import { UserAccountManager } from './UserAccountManager';
 
 interface SettingsManagerProps {
   user: UserSetting;
@@ -604,6 +605,11 @@ export const SettingsManager: React.FC<SettingsManagerProps> = ({
               </div>
             )}
           </div>
+        </div>
+
+        {/* === CARD: Telegram User Account Turbo Engine (Full Width) === */}
+        <div className="col-span-1 md:col-span-2">
+          <UserAccountManager />
         </div>
 
         {/* === CARD 2: AI Batch Renaming Engine (Full Width) === */}

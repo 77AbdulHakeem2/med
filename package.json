@@ -22,6 +22,7 @@
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "telegram": "^2.26.22",
+    "tg-file-id": "^2.0.1",
     "vite": "^6.2.3"
   },
   "devDependencies": {

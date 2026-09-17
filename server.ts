@@ -9,6 +9,8 @@ import { queueWorker } from './server/queueWorker';
 import { FileProcessor } from './server/fileProcessor';
 import { batchAnalyzeAndRenameWithAI, InputBatchItem } from './server/aiRenamer';
 import { generateKeepAliveHtml } from './server/keepAliveHtml';
+import { benchmarkService } from './server/benchmarkService';
+import { telegramMtproto } from './server/telegramMtproto';
 import { SystemStatus } from './src/types';
 
 // In AI Studio development, Nginx reverse proxy forwards external traffic from 8080 to internal port 3000.
@@ -184,6 +186,8 @@ async function startServer() {
     const queue = store.getQueue();
     const activeProcessing = queue.find((q) => q.status !== 'queued' && q.status !== 'published' && q.status !== 'failed');
 
+    const userAccount = await telegramMtproto.getUserAccountInfo();
+
     const status: SystemStatus = {
       botConfigured: !!config.botToken && !isGeminiKey(config.botToken),
       botInfo,
@@ -197,6 +201,8 @@ async function startServer() {
       lastActiveTime: Date.now(),
       resumableTransfersCount: queue.filter((q) => q.chunkProgress?.resumeToken).length,
       aiRenaming: config.aiRenaming,
+      turboSpeed: config.turboSpeed,
+      userAccount,
     };
 
     res.json(status);
@@ -215,6 +221,8 @@ async function startServer() {
       webhookUrl: config.webhookUrl,
       aiRenaming: config.aiRenaming,
       turboSpeed: config.turboSpeed,
+      apiId: config.apiId,
+      apiHash: config.apiHash,
       isConfigured: !!config.botToken && !isGeminiKey(config.botToken),
       isFromSecret,
       hasGeminiKeyConflict,
@@ -223,7 +231,7 @@ async function startServer() {
 
   // Bot Config: save token, AI preferences, turbo speed & toggle polling
   app.post('/api/bot/config', async (req, res) => {
-    const { botToken, pollingActive, webhookUrl, aiRenaming, turboSpeed } = req.body;
+    const { botToken, pollingActive, webhookUrl, aiRenaming, turboSpeed, apiId, apiHash } = req.body;
     const current = store.getConfig();
 
     if (botToken !== undefined && isGeminiKey(botToken)) {
@@ -245,6 +253,8 @@ async function startServer() {
     if (pollingActive !== undefined) update.pollingActive = !!pollingActive;
     if (webhookUrl !== undefined) update.webhookUrl = webhookUrl.trim();
     if (aiRenaming !== undefined) update.aiRenaming = aiRenaming;
+    if (apiId !== undefined && Number(apiId)) update.apiId = Number(apiId);
+    if (apiHash !== undefined && apiHash.trim()) update.apiHash = apiHash.trim();
     if (turboSpeed !== undefined) {
       update.turboSpeed = {
         ...(current.turboSpeed || {
@@ -613,6 +623,69 @@ async function startServer() {
     } catch (err) {
       console.error('Webhook error:', err);
       res.sendStatus(500);
+    }
+  });
+
+  // Live Performance Telemetry & Benchmark Data
+  app.get('/api/system/benchmark', (req, res) => {
+    res.json(benchmarkService.getTelemetry());
+  });
+
+  // Telegram User Account Turbo Engine Endpoints
+  app.get('/api/telegram/user-account', async (req, res) => {
+    try {
+      const info = await telegramMtproto.getUserAccountInfo();
+      res.json(info);
+    } catch (err: any) {
+      res.json({ connected: false, error: err?.message });
+    }
+  });
+
+  app.post('/api/telegram/user-account/send-code', async (req, res) => {
+    try {
+      const { phone } = req.body;
+      if (!phone || typeof phone !== 'string') {
+        return res.json({ success: false, error: 'يرجى إدخال رقم هاتف صحيح بصيغة دولية (مثال: +966...)' });
+      }
+      const result = await telegramMtproto.sendUserLoginCode(phone.trim());
+      res.json(result);
+    } catch (err: any) {
+      res.json({ success: false, error: err?.message || 'فشل إرسال كود التحقق' });
+    }
+  });
+
+  app.post('/api/telegram/user-account/verify-code', async (req, res) => {
+    try {
+      const { code, password } = req.body;
+      if (!code || typeof code !== 'string') {
+        return res.json({ success: false, error: 'يرجى إدخال كود التحقق المرسل من تيليجرام' });
+      }
+      const result = await telegramMtproto.verifyUserLoginCode(code.trim(), password);
+      res.json(result);
+    } catch (err: any) {
+      res.json({ success: false, error: err?.message || 'فشل تسجيل الدخول' });
+    }
+  });
+
+  app.post('/api/telegram/user-account/set-session', async (req, res) => {
+    try {
+      const { sessionString } = req.body;
+      if (!sessionString || typeof sessionString !== 'string') {
+        return res.json({ success: false, error: 'يرجى إدخال كود الجلسة (Session String)' });
+      }
+      const result = await telegramMtproto.setUserSession(sessionString.trim());
+      res.json(result);
+    } catch (err: any) {
+      res.json({ success: false, error: err?.message || 'فشل تفعيل الجلسة' });
+    }
+  });
+
+  app.post('/api/telegram/user-account/logout', async (req, res) => {
+    try {
+      await telegramMtproto.logoutUserAccount();
+      res.json({ success: true });
+    } catch (err: any) {
+      res.json({ success: false, error: err?.message });
     }
   });
 

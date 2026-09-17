@@ -63,8 +63,12 @@ class QueueWorker {
   private activeItemIds = new Set<string>();
 
   // Staged resource semaphores for optimal parallel pipelining
-  private downloadSemaphore = new AsyncSemaphore(2);
-  private ffmpegSemaphore = new AsyncSemaphore(2);
+  private downloadSemaphore = new AsyncSemaphore(
+    Math.max(1, Math.min(10, Number(process.env.DOWNLOAD_SEMAPHORE_LIMIT) || 4))
+  );
+  private ffmpegSemaphore = new AsyncSemaphore(
+    Math.max(1, Math.min(8, Number(process.env.FFMPEG_SEMAPHORE_LIMIT) || 3))
+  );
 
   private getMaxConcurrent(): number {
     const config = store.getConfig();
