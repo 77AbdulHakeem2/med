@@ -321,8 +321,8 @@ export class FileProcessor {
             return { localPath: localDownloadPath, isDownloaded: true };
           }
         } else if ((fileInfo.description?.includes('too big') || !fileInfo.ok) && chatId && messageId) {
-          // File exceeds 20MB Bot API limit: download via MTProto 16-worker turbo engine
-          console.log(`Downloading via MTProto Turbo 16-Worker Engine (Chat: ${chatId}, Msg: ${messageId})...`);
+          // File exceeds 20MB Bot API limit: download via MTProto turbo engine
+          console.log(`Downloading via MTProto Turbo Engine (Chat: ${chatId}, Msg: ${messageId})...`);
           const mtprotoRes = await telegramMtproto.downloadMediaFromMessage(
             token,
             chatId,
@@ -330,13 +330,16 @@ export class FileProcessor {
             localDownloadPath,
             onProgress
           );
-          if (mtprotoRes.success) {
+          if (mtprotoRes.success && fs.existsSync(localDownloadPath) && fs.statSync(localDownloadPath).size > 0) {
             return { localPath: localDownloadPath, isDownloaded: true };
           }
-          console.warn('MTProto download fallback failed:', mtprotoRes.error);
+          throw new Error(mtprotoRes.error || 'فشل تحميل الملف الأصلي من تليجرام عبر MTProto');
+        } else if (!fileInfo.ok) {
+          throw new Error(fileInfo.description || 'فشل جلب مسار الملف من تليجرام');
         }
       } catch (err: any) {
         console.warn('Error downloading file from Telegram:', err);
+        throw err;
       }
     }
 

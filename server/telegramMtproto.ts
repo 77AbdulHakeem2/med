@@ -57,6 +57,7 @@ class TelegramMtprotoService {
   private connectingPromise: Promise<TelegramClient | null> | null = null;
   private currentToken: string = '';
   private downloadSemaphore = new AsyncSemaphore(2);
+  public lastInitError: string = '';
 
   private getSavedSession(): string {
     try {
@@ -71,6 +72,14 @@ class TelegramMtprotoService {
     try {
       if (sessionString) {
         fs.writeFileSync(SESSION_FILE, sessionString, 'utf8');
+      }
+    } catch {}
+  }
+
+  public clearSession(): void {
+    try {
+      if (fs.existsSync(SESSION_FILE)) {
+        fs.unlinkSync(SESSION_FILE);
       }
     } catch {}
   }
@@ -114,8 +123,8 @@ class TelegramMtprotoService {
           this.client = null;
         }
 
-        const savedSession = this.getSavedSession();
-        const client = new TelegramClient(new StringSession(savedSession), API_ID, API_HASH, {
+        let savedSession = forceFresh ? '' : this.getSavedSession();
+        let client = new TelegramClient(new StringSession(savedSession), API_ID, API_HASH, {
           connectionRetries: 5,
           useIPV6: false,
           timeout: 45,
@@ -123,9 +132,38 @@ class TelegramMtprotoService {
           requestRetries: 3,
         });
 
-        await client.start({ botAuthToken: botToken });
+        try {
+          await client.start({ botAuthToken: botToken });
+        } catch (startErr: any) {
+          const errMsg = startErr?.message || String(startErr);
+          // If auth key duplicated or session invalidated, clear stored session and retry immediately fresh
+          if (
+            savedSession &&
+            (errMsg.includes('AUTH_KEY_DUPLICATED') ||
+              errMsg.includes('406') ||
+              errMsg.includes('401') ||
+              errMsg.includes('SESSION_REVOKED') ||
+              errMsg.includes('SESSION_EXPIRED'))
+          ) {
+            console.warn(`[MTProto] Stored session invalid (${errMsg}). Clearing stored session and reconnecting fresh...`);
+            this.clearSession();
+            savedSession = '';
+            client = new TelegramClient(new StringSession(''), API_ID, API_HASH, {
+              connectionRetries: 5,
+              useIPV6: false,
+              timeout: 45,
+              autoReconnect: true,
+              requestRetries: 3,
+            });
+            await client.start({ botAuthToken: botToken });
+          } else {
+            throw startErr;
+          }
+        }
+
         this.client = client;
         this.currentToken = botToken;
+        this.lastInitError = '';
 
         // Persist session to disk for zero-latency reconnects
         try {
@@ -137,7 +175,11 @@ class TelegramMtprotoService {
 
         return client;
       } catch (err: any) {
-        console.warn('[MTProto] Failed to initialize MTProto client:', err?.message || err);
+        this.lastInitError = err?.message || String(err);
+        console.warn('[MTProto] Failed to initialize MTProto client:', this.lastInitError);
+        if (this.lastInitError.includes('AUTH_KEY_DUPLICATED') || this.lastInitError.includes('406')) {
+          this.clearSession();
+        }
         await this.resetClient();
         return null;
       } finally {
@@ -169,7 +211,18 @@ class TelegramMtprotoService {
             return { success: false, localPath: '', error: 'تعذر الاتصال بخادم MTProto' };
           }
 
-          const entity = await client.getEntity(String(chatId));
+          let entity: any;
+          try {
+            entity = await client.getEntity(String(chatId));
+          } catch {
+            const num = Number(chatId);
+            if (!isNaN(num)) {
+              entity = await client.getEntity(num);
+            } else {
+              throw new Error(`تعذر العثور على محادثة المستخدم (${chatId})`);
+            }
+          }
+
           const messages = await client.getMessages(entity, { ids: [messageId] });
 
           if (!messages || messages.length === 0 || !messages[0]?.media) {
@@ -182,8 +235,14 @@ class TelegramMtprotoService {
           let lastNotifiedPct = -1;
           let lastNotifiedTime = 0;
 
+          // Remove any stale output file before downloading
+          if (fs.existsSync(outputPath)) {
+            try { fs.unlinkSync(outputPath); } catch {}
+          }
+
           // Download directly to disk with 4 parallel workers (Telegram sweet spot)
-          const buffer = await client.downloadMedia(msg.media, {
+          // Pass msg so GramJS has access to inputChat and message ID for refreshing file references
+          const buffer = await client.downloadMedia(msg, {
             outputFile: outputPath,
             workers: 4,
             progressCallback: ((downloaded: any, total: any) => {
@@ -231,9 +290,13 @@ class TelegramMtprotoService {
         } catch (err: any) {
           const errMsg = err?.message || String(err);
           const isDisconnect = errMsg.includes('Not connected') || !this.client?.connected;
+          const isAuthProblem = errMsg.includes('AUTH_KEY') || errMsg.includes('406') || errMsg.includes('401');
 
-          if (isDisconnect && attempt === 1) {
-            console.warn('[MTProto] Connection interrupted (Not connected), resetting client and retrying download...');
+          if ((isDisconnect || isAuthProblem) && attempt === 1) {
+            console.warn(`[MTProto] Connection interrupted (${errMsg}), resetting client and retrying download...`);
+            if (isAuthProblem) {
+              this.clearSession();
+            }
             await this.resetClient();
             continue;
           }
@@ -276,7 +339,17 @@ class TelegramMtprotoService {
           return { ok: false, description: 'تعذر الاتصال بخادم تليجرام المباشر' };
         }
 
-        const entity = await client.getEntity(String(targetChannelId));
+        let entity: any;
+        try {
+          entity = await client.getEntity(String(targetChannelId));
+        } catch {
+          const num = Number(targetChannelId);
+          if (!isNaN(num)) {
+            entity = await client.getEntity(num);
+          } else {
+            throw new Error(`تعذر العثور على القناة المستهدفة (${targetChannelId})`);
+          }
+        }
         const stat = fs.statSync(filePath);
         const filename = displayFilename || path.basename(filePath);
 
@@ -373,9 +446,13 @@ class TelegramMtprotoService {
       } catch (err: any) {
         const errMsg = err?.message || String(err);
         const isDisconnect = errMsg.includes('Not connected') || !this.client?.connected;
+        const isAuthProblem = errMsg.includes('AUTH_KEY') || errMsg.includes('406') || errMsg.includes('401');
 
-        if (isDisconnect && attempt === 1) {
-          console.warn('[MTProto] Connection dropped (Not connected), resetting client and retrying upload...');
+        if ((isDisconnect || isAuthProblem) && attempt === 1) {
+          console.warn(`[MTProto] Connection dropped (${errMsg}), resetting client and retrying upload...`);
+          if (isAuthProblem) {
+            this.clearSession();
+          }
           await this.resetClient();
           continue;
         }
