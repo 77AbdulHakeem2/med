@@ -185,8 +185,28 @@ class Store {
               ...this.data.config.turboSpeed!,
               ...(parsed.config?.turboSpeed || {}),
             },
+            userSession: parsed.config?.userSession || '',
           },
         };
+
+        // Sync user session across disk and store
+        const userSessionFile = path.join(DATA_DIR, 'mtproto_user_session.txt');
+        let fileSession = '';
+        if (fs.existsSync(userSessionFile)) {
+          try {
+            fileSession = fs.readFileSync(userSessionFile, 'utf8').trim();
+          } catch {}
+        }
+        const effectiveUserSession = this.data.config.userSession || fileSession || (process.env.TELEGRAM_USER_SESSION || '').trim();
+        if (effectiveUserSession) {
+          this.data.config.userSession = effectiveUserSession;
+          process.env.TELEGRAM_USER_SESSION = effectiveUserSession;
+          if (!fs.existsSync(userSessionFile) || fileSession !== effectiveUserSession) {
+            try {
+              fs.writeFileSync(userSessionFile, effectiveUserSession, 'utf8');
+            } catch {}
+          }
+        }
 
         if (resolvedToken && process.env.TELEGRAM_BOT_TOKEN !== resolvedToken) {
           process.env.TELEGRAM_BOT_TOKEN = resolvedToken;
@@ -626,6 +646,19 @@ class Store {
     }
     const { aiRenaming, turboSpeed, ...rest } = configUpdate;
     Object.assign(this.data.config, rest);
+
+    if (configUpdate.userSession !== undefined) {
+      const userSessionFile = path.join(DATA_DIR, 'mtproto_user_session.txt');
+      try {
+        if (configUpdate.userSession) {
+          fs.writeFileSync(userSessionFile, configUpdate.userSession.trim(), 'utf8');
+          process.env.TELEGRAM_USER_SESSION = configUpdate.userSession.trim();
+        } else if (fs.existsSync(userSessionFile)) {
+          fs.unlinkSync(userSessionFile);
+          delete process.env.TELEGRAM_USER_SESSION;
+        }
+      } catch {}
+    }
 
     // Save token into runtime process environment & persist to .env file
     if (this.data.config.botToken && !isGeminiKey(this.data.config.botToken)) {

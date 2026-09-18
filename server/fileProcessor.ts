@@ -280,7 +280,13 @@ export class FileProcessor {
     originalFilename: string,
     onProgress?: (pct: number, mbps?: number) => Promise<void>,
     chatId?: string,
-    messageId?: number
+    messageId?: number,
+    forwardMeta?: {
+      sourceChannelId?: string | number;
+      sourceMessageId?: number;
+      sourceChannelUsername?: string;
+      sourceChannelTitle?: string;
+    }
   ): Promise<{ localPath: string; isDownloaded: boolean; error?: string }> {
     ensureDirectories();
     const { ext } = splitExtension(originalFilename);
@@ -320,15 +326,26 @@ export class FileProcessor {
             if (onProgress) await onProgress(100, finalSpeed);
             return { localPath: localDownloadPath, isDownloaded: true };
           }
-        } else if ((fileInfo.description?.includes('too big') || !fileInfo.ok) && chatId && messageId) {
-          // File exceeds 20MB Bot API limit: download via MTProto turbo engine
-          console.log(`Downloading via MTProto Turbo Engine (Chat: ${chatId}, Msg: ${messageId})...`);
+        } else if (
+          (fileInfo.description?.includes('too big') || !fileInfo.ok) &&
+          (chatId || forwardMeta?.sourceChannelId || forwardMeta?.sourceChannelUsername)
+        ) {
+          // File exceeds 20MB Bot API limit or getFile failed: download via MTProto turbo engine
+          const targetMsgId = messageId || forwardMeta?.sourceMessageId || 0;
+          console.log(`[MTProto] Downloading via MTProto Turbo Engine (Chat: ${chatId}, Msg: ${targetMsgId}, Source: ${forwardMeta?.sourceChannelUsername || forwardMeta?.sourceChannelTitle || forwardMeta?.sourceChannelId})...`);
           const mtprotoRes = await telegramMtproto.downloadMediaFromMessage(
             token,
-            chatId,
-            messageId,
+            chatId || String(forwardMeta?.sourceChannelId || ''),
+            targetMsgId,
             localDownloadPath,
-            onProgress
+            onProgress,
+            {
+              sourceChatId: forwardMeta?.sourceChannelId,
+              sourceMessageId: forwardMeta?.sourceMessageId,
+              sourceChannelUsername: forwardMeta?.sourceChannelUsername,
+              sourceChannelTitle: forwardMeta?.sourceChannelTitle,
+              originalFilename,
+            }
           );
           if (mtprotoRes.success && fs.existsSync(localDownloadPath) && fs.statSync(localDownloadPath).size > 0) {
             return { localPath: localDownloadPath, isDownloaded: true };

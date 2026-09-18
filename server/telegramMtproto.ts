@@ -1,6 +1,7 @@
 import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions';
 import { Api } from 'telegram';
+import { NewMessage } from 'telegram/events';
 import { CustomFile } from 'telegram/client/uploads';
 import bigInt from 'big-integer';
 import { readBigIntFromBuffer, generateRandomBytes } from 'telegram/Helpers';
@@ -8,27 +9,39 @@ import { computeCheck } from 'telegram/Password';
 import fs from 'fs';
 import path from 'path';
 import { benchmarkService } from './benchmarkService';
+import { store } from './store';
 
-// Secure credentials resolution: uses custom credentials if provided in env, else standard official keys
-const API_ID = Number(process.env.TELEGRAM_API_ID) || 6;
-const API_HASH = process.env.TELEGRAM_API_HASH || 'eb06d4abfb49dc3eeb1aeb98ae0f581e';
+// Dynamic API credentials resolver: prioritizes custom credentials from store/UI over defaults
+export function getApiCredentials(): { apiId: number; apiHash: string } {
+  try {
+    const cfg = store.getConfig();
+    const apiId = cfg?.apiId || Number(process.env.TELEGRAM_API_ID) || 6;
+    const apiHash = cfg?.apiHash || process.env.TELEGRAM_API_HASH || 'eb06d4abfb49dc3eeb1aeb98ae0f581e';
+    return { apiId, apiHash };
+  } catch {
+    return {
+      apiId: Number(process.env.TELEGRAM_API_ID) || 6,
+      apiHash: process.env.TELEGRAM_API_HASH || 'eb06d4abfb49dc3eeb1aeb98ae0f581e',
+    };
+  }
+}
 
-// Configurable performance concurrency limits
-const MTPROTO_DOWNLOAD_WORKERS = Math.max(1, Math.min(8, Number(process.env.MTPROTO_DOWNLOAD_WORKERS) || 3));
-const MTPROTO_UPLOAD_WORKERS = Math.max(2, Math.min(16, Number(process.env.MTPROTO_UPLOAD_WORKERS) || 8));
-const DOWNLOAD_SEMAPHORE_LIMIT = Math.max(1, Math.min(10, Number(process.env.DOWNLOAD_SEMAPHORE_LIMIT) || 4));
+// Configurable high-performance concurrency limits
+const MTPROTO_DOWNLOAD_WORKERS = Math.max(2, Math.min(16, Number(process.env.MTPROTO_DOWNLOAD_WORKERS) || 12));
+const MTPROTO_UPLOAD_WORKERS = Math.max(4, Math.min(16, Number(process.env.MTPROTO_UPLOAD_WORKERS) || 16));
+const DOWNLOAD_SEMAPHORE_LIMIT = Math.max(2, Math.min(10, Number(process.env.DOWNLOAD_SEMAPHORE_LIMIT) || 6));
 
-// Adaptive concurrency resolver: optimizes worker count based on payload size & Telegram Bot API limits
+// Adaptive concurrency resolver: optimizes worker count based on payload size & Telegram limits
 export function getAdaptiveDownloadWorkers(fileSize: number, configuredMax: number = MTPROTO_DOWNLOAD_WORKERS): number {
-  if (fileSize <= 5 * 1024 * 1024) return 2;
-  if (fileSize <= 40 * 1024 * 1024) return Math.min(3, configuredMax);
-  return Math.min(configuredMax, 4);
+  if (fileSize <= 5 * 1024 * 1024) return 4;
+  if (fileSize <= 40 * 1024 * 1024) return Math.min(8, configuredMax);
+  return Math.min(configuredMax, 16);
 }
 
 export function getAdaptiveUploadWorkers(fileSize: number, configuredMax: number = MTPROTO_UPLOAD_WORKERS): number {
-  if (fileSize <= 5 * 1024 * 1024) return 2;
-  if (fileSize <= 40 * 1024 * 1024) return Math.min(4, configuredMax);
-  return Math.min(configuredMax, 8);
+  if (fileSize <= 5 * 1024 * 1024) return 4;
+  if (fileSize <= 40 * 1024 * 1024) return Math.min(8, configuredMax);
+  return Math.min(configuredMax, 16);
 }
 
 // Maximum protocol chunk size permitted by Telegram MTProto (512 KB)
@@ -37,6 +50,7 @@ const CHUNK_SIZE_512KB = 512 * 1024;
 // Persistent session storage file to eliminate redundant DC handshakes & authorization cycles
 const SESSION_FILE = path.join(process.cwd(), 'data', 'mtproto_session.txt');
 const USER_SESSION_FILE = path.join(process.cwd(), 'data', 'mtproto_user_session.txt');
+const CHANNEL_CACHE_FILE = path.join(process.cwd(), 'data', 'channel_cache.json');
 
 class AsyncSemaphore {
   private active = 0;
@@ -86,6 +100,58 @@ class TelegramMtprotoService {
   private downloadSemaphore = new AsyncSemaphore(DOWNLOAD_SEMAPHORE_LIMIT);
   public lastInitError: string = '';
 
+  // In-memory message cache to ensure real-time media messages are always retrievable
+  private recentMessagesMap: Map<string, any> = new Map();
+  private maxCachedMessages = 500;
+
+  public cacheIncomingMessage(msg: any): void {
+    if (!msg || !msg.id) return;
+    const msgIdKey = String(msg.id);
+    this.recentMessagesMap.set(msgIdKey, msg);
+    if (msg.peerId?.userId) {
+      this.recentMessagesMap.set(`${msg.peerId.userId}:${msg.id}`, msg);
+    }
+    if (msg.peerId?.channelId) {
+      this.recentMessagesMap.set(`${msg.peerId.channelId}:${msg.id}`, msg);
+      this.recentMessagesMap.set(`-100${msg.peerId.channelId}:${msg.id}`, msg);
+    }
+    if (this.recentMessagesMap.size > this.maxCachedMessages) {
+      const firstKey = this.recentMessagesMap.keys().next().value;
+      if (firstKey) this.recentMessagesMap.delete(firstKey);
+    }
+  }
+
+  public getCachedMessage(id: number | string, chatId?: string | number): any {
+    if (chatId) {
+      const combinedKey = `${chatId}:${id}`;
+      if (this.recentMessagesMap.has(combinedKey)) {
+        return this.recentMessagesMap.get(combinedKey);
+      }
+    }
+    return this.recentMessagesMap.get(String(id));
+  }
+
+  public getCachedChannelUsername(id: string | number): string | undefined {
+    try {
+      if (fs.existsSync(CHANNEL_CACHE_FILE)) {
+        const data = JSON.parse(fs.readFileSync(CHANNEL_CACHE_FILE, 'utf8'));
+        return data[String(id)];
+      }
+    } catch {}
+    return undefined;
+  }
+
+  public rememberChannelUsername(id: string | number, username: string): void {
+    try {
+      const data: Record<string, string> = fs.existsSync(CHANNEL_CACHE_FILE)
+        ? JSON.parse(fs.readFileSync(CHANNEL_CACHE_FILE, 'utf8'))
+        : {};
+      const clean = username.replace(/^@/, '').trim();
+      data[String(id)] = clean;
+      fs.writeFileSync(CHANNEL_CACHE_FILE, JSON.stringify(data, null, 2), 'utf8');
+    } catch {}
+  }
+
   // User Account MTProto Turbo Engine (multi-DC, uncapped bandwidth)
   private userClient: TelegramClient | null = null;
   private userConnectingPromise: Promise<TelegramClient | null> | null = null;
@@ -94,21 +160,42 @@ class TelegramMtprotoService {
   private pendingPhoneCodeHash: string = '';
 
   public getSavedUserSession(): string {
+    try {
+      const cfg = store.getConfig();
+      if (cfg?.userSession && cfg.userSession.trim()) {
+        return cfg.userSession.trim();
+      }
+    } catch {}
+
     const envSession = process.env.TELEGRAM_USER_SESSION;
     if (envSession && envSession.trim()) {
       return envSession.trim();
     }
+
     try {
       if (fs.existsSync(USER_SESSION_FILE)) {
-        return fs.readFileSync(USER_SESSION_FILE, 'utf8').trim();
+        const s = fs.readFileSync(USER_SESSION_FILE, 'utf8').trim();
+        if (s) return s;
       }
     } catch {}
     return '';
   }
 
   public saveUserSession(sessionString: string): void {
+    const trimmed = (sessionString || '').trim();
+    if (!trimmed) return;
+
     try {
-      fs.writeFileSync(USER_SESSION_FILE, sessionString.trim(), 'utf8');
+      const dir = path.dirname(USER_SESSION_FILE);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(USER_SESSION_FILE, trimmed, 'utf8');
+      process.env.TELEGRAM_USER_SESSION = trimmed;
+    } catch {}
+
+    try {
+      store.updateConfig({ userSession: trimmed });
     } catch {}
   }
 
@@ -136,12 +223,17 @@ class TelegramMtprotoService {
 
     this.userConnectingPromise = (async () => {
       try {
-        const client = new TelegramClient(new StringSession(session), API_ID, API_HASH, {
-          connectionRetries: 5,
+        const { apiId, apiHash } = getApiCredentials();
+        const client = new TelegramClient(new StringSession(session), apiId, apiHash, {
+          connectionRetries: 10,
           useIPV6: false,
           timeout: 45,
           autoReconnect: true,
-          requestRetries: 3,
+          requestRetries: 5,
+          floodSleepThreshold: 120,
+          deviceModel: 'MedPulse Desktop Pro',
+          systemVersion: 'Linux x86_64',
+          appVersion: '3.5.0',
         });
 
         await client.connect();
@@ -174,16 +266,23 @@ class TelegramMtprotoService {
     username?: string;
     userId?: number;
     isPremium?: boolean;
+    apiIdUsed?: number;
+    error?: string;
   }> {
     try {
+      const session = this.getSavedUserSession();
+      if (!session) {
+        return { connected: false, error: 'لم يتم ربط حساب تليجرام شخصي حتى الآن' };
+      }
       const client = await this.getUserClient();
       if (!client) {
-        return { connected: false };
+        return { connected: false, error: 'جلسة الحساب محفوظة ولكن تعذر تأكيد الاتصال بالخادم' };
       }
       const me = (await client.getMe()) as any;
       if (!me) {
-        return { connected: false };
+        return { connected: false, error: 'تعذر جلب معلومات الحساب' };
       }
+      const { apiId } = getApiCredentials();
       return {
         connected: true,
         userId: Number(me.id) || undefined,
@@ -192,9 +291,10 @@ class TelegramMtprotoService {
         username: me.username || '',
         phone: me.phone || '',
         isPremium: Boolean(me.premium),
+        apiIdUsed: apiId,
       };
-    } catch {
-      return { connected: false };
+    } catch (err: any) {
+      return { connected: false, error: err?.message || 'تعذر جلب حالة الحساب' };
     }
   }
 
@@ -205,15 +305,19 @@ class TelegramMtprotoService {
         this.pendingAuthClient = null;
       }
 
-      const client = new TelegramClient(new StringSession(''), API_ID, API_HASH, {
-        connectionRetries: 5,
+      const { apiId, apiHash } = getApiCredentials();
+      const client = new TelegramClient(new StringSession(''), apiId, apiHash, {
+        connectionRetries: 8,
         useIPV6: false,
         timeout: 45,
         autoReconnect: true,
+        deviceModel: 'MedPulse Desktop Pro',
+        systemVersion: 'Linux x86_64',
+        appVersion: '3.5.0',
       });
 
       await client.connect();
-      const res = await client.sendCode({ apiId: API_ID, apiHash: API_HASH }, phoneNumber.trim());
+      const res = await client.sendCode({ apiId, apiHash }, phoneNumber.trim());
 
       this.pendingAuthClient = client;
       this.pendingPhoneNumber = phoneNumber.trim();
@@ -322,6 +426,7 @@ class TelegramMtprotoService {
       this.pendingPhoneCodeHash = '';
 
       const me = (await client.getMe()) as any;
+      const { apiId } = getApiCredentials();
       return {
         success: true,
         user: {
@@ -330,6 +435,7 @@ class TelegramMtprotoService {
           username: me.username,
           phone: me.phone,
           isPremium: Boolean(me.premium),
+          apiIdUsed: apiId,
         },
       };
     } catch (err: any) {
@@ -356,11 +462,11 @@ class TelegramMtprotoService {
       this.saveUserSession(sessionString);
       const client = await this.getUserClient(true);
       if (!client) {
-        this.logoutUserAccount();
-        return { success: false, error: 'رمز الجلسة غير صالح أو منتهي الصلاحية.' };
+        return { success: false, error: 'تعذر التحقق من الجلسة في الوقت الحالي، ولكن تم حفظها وسيعاد الاتصال تلقائياً.' };
       }
 
       const me = (await client.getMe()) as any;
+      const { apiId } = getApiCredentials();
       return {
         success: true,
         user: {
@@ -369,10 +475,10 @@ class TelegramMtprotoService {
           username: me.username,
           phone: me.phone,
           isPremium: Boolean(me.premium),
+          apiIdUsed: apiId,
         },
       };
     } catch (err: any) {
-      this.logoutUserAccount();
       return { success: false, error: err?.message || 'فشل تفعيل الجلسة.' };
     }
   }
@@ -388,6 +494,10 @@ class TelegramMtprotoService {
     }
     this.pendingPhoneNumber = '';
     this.pendingPhoneCodeHash = '';
+    process.env.TELEGRAM_USER_SESSION = '';
+    try {
+      store.updateConfig({ userSession: '' });
+    } catch {}
     try {
       if (fs.existsSync(USER_SESSION_FILE)) {
         fs.unlinkSync(USER_SESSION_FILE);
@@ -459,13 +569,17 @@ class TelegramMtprotoService {
           this.client = null;
         }
 
+        const { apiId, apiHash } = getApiCredentials();
         let savedSession = forceFresh ? '' : this.getSavedSession();
-        let client = new TelegramClient(new StringSession(savedSession), API_ID, API_HASH, {
-          connectionRetries: 5,
+        let client = new TelegramClient(new StringSession(savedSession), apiId, apiHash, {
+          connectionRetries: 8,
           useIPV6: false,
           timeout: 45,
           autoReconnect: true,
-          requestRetries: 3,
+          requestRetries: 5,
+          deviceModel: 'MedPulse Bot Pro',
+          systemVersion: 'Linux x86_64',
+          appVersion: '3.5.0',
         });
 
         try {
@@ -484,12 +598,15 @@ class TelegramMtprotoService {
             console.warn(`[MTProto] Stored session invalid (${errMsg}). Clearing stored session and reconnecting fresh...`);
             this.clearSession();
             savedSession = '';
-            client = new TelegramClient(new StringSession(''), API_ID, API_HASH, {
-              connectionRetries: 5,
+            client = new TelegramClient(new StringSession(''), apiId, apiHash, {
+              connectionRetries: 8,
               useIPV6: false,
               timeout: 45,
               autoReconnect: true,
-              requestRetries: 3,
+              requestRetries: 5,
+              deviceModel: 'MedPulse Bot Pro',
+              systemVersion: 'Linux x86_64',
+              appVersion: '3.5.0',
             });
             await client.start({ botAuthToken: botToken });
           } else {
@@ -500,6 +617,17 @@ class TelegramMtprotoService {
         this.client = client;
         this.currentToken = botToken;
         this.lastInitError = '';
+
+        // Attach incoming message listener to cache documents in real-time
+        try {
+          client.addEventHandler((event: any) => {
+            if (event?.message) {
+              this.cacheIncomingMessage(event.message);
+            }
+          }, new NewMessage({}));
+        } catch (evErr) {
+          console.warn('[MTProto] Could not attach NewMessage event listener:', evErr);
+        }
 
         // Persist session to disk for zero-latency reconnects
         try {
@@ -693,13 +821,22 @@ class TelegramMtprotoService {
   /**
    * Downloads media from a specific chat message using MTProto at turbo speed.
    * Leverages parallel 512KB chunk streaming with intelligent fallback.
+   * Multi-Source Resolution: Checks in-memory cache, target user chat, source channels (via username, title, or filename),
+   * and User Account client fallback.
    */
   public async downloadMediaFromMessage(
     botToken: string,
     chatId: string | number,
     messageId: number,
     outputPath: string,
-    onProgress?: (pct: number, mbps?: number) => Promise<void>
+    onProgress?: (pct: number, mbps?: number) => Promise<void>,
+    options?: {
+      sourceChatId?: string | number;
+      sourceMessageId?: number;
+      sourceChannelUsername?: string;
+      sourceChannelTitle?: string;
+      originalFilename?: string;
+    }
   ): Promise<{ success: boolean; localPath: string; error?: string }> {
     const release = await this.downloadSemaphore.acquire();
     try {
@@ -710,39 +847,132 @@ class TelegramMtprotoService {
             return { success: false, localPath: '', error: 'تعذر الاتصال بخادم MTProto' };
           }
 
-          let entity: any;
-          try {
-            entity = await client.getEntity(String(chatId));
-          } catch {
-            const num = Number(chatId);
-            if (!isNaN(num)) {
-              entity = await client.getEntity(num);
-            } else {
-              throw new Error(`تعذر العثور على محادثة المستخدم (${chatId})`);
+          let entity: any = null;
+          let msg: any = null;
+
+          // Check if User Account MTProto Turbo Engine is connected
+          const userClient = await this.getUserClient();
+          let activeDownloadClient: TelegramClient = client;
+
+          // 1. Check in-memory real-time MTProto message cache
+          const cached = this.getCachedMessage(messageId, chatId);
+          if (cached && cached.media) {
+            msg = cached;
+          }
+
+          // 2. Query user/chat entity
+          if (!msg && chatId) {
+            try {
+              entity = await client.getEntity(String(chatId)).catch(async () => {
+                const num = Number(chatId);
+                return !isNaN(num) ? await client.getEntity(num) : null;
+              });
+              if (entity && messageId) {
+                const messages = await client.getMessages(entity, { ids: [messageId] }).catch(() => []);
+                if (messages && messages.length > 0 && messages[0]?.media) {
+                  msg = messages[0];
+                }
+              }
+            } catch (chatErr) {
+              console.warn('[MTProto] Could not fetch message from user chat entity:', chatErr);
             }
           }
 
-          const messages = await client.getMessages(entity, { ids: [messageId] });
+          // 3. Multi-Channel Resolution Fallback:
+          // If media was forwarded from a channel (e.g. @Medicine_Way2), fetch directly from the source channel
+          if (!msg && options?.sourceMessageId) {
+            const candidateChannelNames: string[] = [];
+            if (options.sourceChannelUsername) {
+              candidateChannelNames.push(options.sourceChannelUsername.replace(/^@/, '').trim());
+            }
+            // Extract username from original filename: e.g. "Introduction Physiology - @Medicine_Way2.mkv" -> "Medicine_Way2"
+            const fnMatch = (options.originalFilename || '').match(/@([a-zA-Z0-9_]{4,})/i);
+            if (fnMatch && fnMatch[1]) {
+              candidateChannelNames.push(fnMatch[1].trim());
+            }
+            // Extract from channel title: e.g. "@Medicine_Way2"
+            const titleMatch = (options.sourceChannelTitle || '').match(/@([a-zA-Z0-9_]{4,})/i);
+            if (titleMatch && titleMatch[1]) {
+              candidateChannelNames.push(titleMatch[1].trim());
+            }
+            if (options.sourceChatId) {
+              const cachedUser = this.getCachedChannelUsername(options.sourceChatId);
+              if (cachedUser) candidateChannelNames.push(cachedUser);
+              candidateChannelNames.push(String(options.sourceChatId));
+            }
 
-          if (!messages || messages.length === 0 || !messages[0]?.media) {
-            return { success: false, localPath: '', error: 'الرسالة أو الوسائط غير موجودة' };
+            // Deduplicate
+            const uniqueChannels = [...new Set(candidateChannelNames.filter(Boolean))];
+            for (const chanIdentifier of uniqueChannels) {
+              if (msg) break;
+              try {
+                const chanEntity = await client.getEntity(chanIdentifier).catch(async () => {
+                  const num = Number(chanIdentifier);
+                  return !isNaN(num) ? await client.getEntity(num) : null;
+                });
+                if (chanEntity) {
+                  const chanMsgs = await client.getMessages(chanEntity, { ids: [options.sourceMessageId] }).catch(() => []);
+                  if (chanMsgs && chanMsgs.length > 0 && chanMsgs[0]?.media) {
+                    msg = chanMsgs[0];
+                    entity = chanEntity;
+                    const chanUser = (chanEntity as any)?.username;
+                    if (chanUser) {
+                      this.rememberChannelUsername(String((chanEntity as any).id), chanUser);
+                      if (options.sourceChatId) this.rememberChannelUsername(options.sourceChatId, chanUser);
+                    }
+                    console.log(`[MTProto] Successfully resolved media from source channel "${chanIdentifier}" (msgId: ${options.sourceMessageId})`);
+                    break;
+                  }
+                }
+              } catch {
+                // Continue checking next candidate
+              }
+            }
           }
 
-          const msg = messages[0];
+          // 4. User Account Client Fallback (if user session connected and message still not found)
+          if (!msg && userClient && (await userClient.checkAuthorization().catch(() => false))) {
+            try {
+              if (entity && messageId) {
+                const userMsgs = await userClient.getMessages(entity, { ids: [messageId] }).catch(() => []);
+                if (userMsgs && userMsgs.length > 0 && userMsgs[0]?.media) {
+                  msg = userMsgs[0];
+                  activeDownloadClient = userClient;
+                }
+              }
+              if (!msg && options?.sourceMessageId && options?.sourceChatId) {
+                const uChanEntity = await userClient.getEntity(String(options.sourceChatId)).catch(() => null);
+                if (uChanEntity) {
+                  const uChanMsgs = await userClient.getMessages(uChanEntity, { ids: [options.sourceMessageId] }).catch(() => []);
+                  if (uChanMsgs && uChanMsgs.length > 0 && uChanMsgs[0]?.media) {
+                    msg = uChanMsgs[0];
+                    entity = uChanEntity;
+                    activeDownloadClient = userClient;
+                  }
+                }
+              }
+            } catch {}
+          }
+
+          if (!msg || !msg.media) {
+            return { success: false, localPath: '', error: 'الرسالة أو الوسائط غير موجودة' };
+          }
 
           // Remove any stale output file before downloading
           if (fs.existsSync(outputPath)) {
             try { fs.unlinkSync(outputPath); } catch {}
           }
 
+          // Prioritize User Account Client for downloading media chunks if available
+          if (userClient && (await userClient.checkAuthorization().catch(() => false))) {
+            activeDownloadClient = userClient;
+          }
+
           const doc = (msg.media as any)?.document;
           let downloaded = false;
 
-          // Check if User Account MTProto Turbo Engine is connected
-          const userClient = await this.getUserClient();
-          const activeDownloadClient = (userClient && (await userClient.checkAuthorization().catch(() => false))) ? userClient : client;
           const isUserAccount = activeDownloadClient === userClient;
-          const maxDownWorkers = isUserAccount ? 8 : MTPROTO_DOWNLOAD_WORKERS;
+          const maxDownWorkers = isUserAccount ? 16 : MTPROTO_DOWNLOAD_WORKERS;
 
           // If standard Document media, use high-speed parallel 512KB chunk streaming
           if (doc && doc.size && Number(doc.size) > 0) {
@@ -769,7 +999,7 @@ class TelegramMtprotoService {
             let lastNotifiedPct = -1;
             let lastNotifiedTime = 0;
 
-            const buffer = await client.downloadMedia(msg, {
+            const buffer = await activeDownloadClient.downloadMedia(msg, {
               outputFile: outputPath,
               workers: MTPROTO_DOWNLOAD_WORKERS,
               progressCallback: ((downloadedBytes: any, total: any) => {
@@ -1039,7 +1269,7 @@ class TelegramMtprotoService {
         const stat = fs.statSync(filePath);
         const filename = displayFilename || path.basename(filePath);
         const isUserAccount = client === userClient;
-        const maxUpWorkers = isUserAccount ? 12 : MTPROTO_UPLOAD_WORKERS;
+        const maxUpWorkers = isUserAccount ? 16 : MTPROTO_UPLOAD_WORKERS;
 
         const attributes: any[] = [];
         attributes.push(
@@ -1070,8 +1300,8 @@ class TelegramMtprotoService {
 
         let uploadedFileHandle: any;
 
-        // Use ultra-fast parallel chunk streaming for files > 10MB
-        if (stat.size > 10 * 1024 * 1024) {
+        // Use ultra-fast parallel chunk streaming for files > 1MB
+        if (stat.size > 1024 * 1024) {
           try {
             uploadedFileHandle = await this.uploadDocumentParallel(
               client,

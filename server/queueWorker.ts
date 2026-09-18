@@ -783,7 +783,9 @@ class QueueWorker {
       });
 
       const releaseDownload = await this.downloadSemaphore.acquire();
-      let downloadResult;
+      let downloadResult: { localPath: string; isDownloaded: boolean; error?: string } | null = null;
+      let usedCloudDirectFallback = false;
+
       try {
         downloadResult = await FileProcessor.downloadOriginalFile(
           token,
@@ -799,37 +801,58 @@ class QueueWorker {
             );
           },
           item.chatId,
-          item.messageId
+          item.messageId,
+          {
+            sourceChannelId: item.sourceChannelId,
+            sourceMessageId: item.sourceMessageId,
+            sourceChannelTitle: item.sourceChannelTitle,
+            sourceChannelUsername: item.sourceChannelUsername,
+          }
         );
+      } catch (dlErr: any) {
+        if (token && targetChannel && item.fileId && !item.fileId.startsWith('fake_')) {
+          console.warn(`[QueueWorker] Physical media download could not complete for #${item.sequenceNumber} (${dlErr.message}). Safely switching to Cloud Direct Dispatch fallback so channel publishing does not stall.`);
+          usedCloudDirectFallback = true;
+        } else {
+          throw dlErr;
+        }
       } finally {
         releaseDownload();
       }
 
-      // Stage 3: 🛠️ معالجة الملف ودمج الغلاف
-      store.updateQueueItem(item.id, {
-        status: 'processing',
-        statusMessage: '🛠️ معالجة الملف',
-      });
-      tracker.updateProgress('⚙️ دمج الغلاف في الوسائط (FFmpeg)', 75, 'إنشاء ملف الإخراج النهائي');
+      let processRes: { success: boolean; outputPath: string | null; error?: string } = {
+        success: true,
+        outputPath: null,
+      };
 
-      const releaseFFmpeg = await this.ffmpegSemaphore.acquire();
-      let processRes;
-      try {
-        processRes = await FileProcessor.processAndEmbedThumbnail(
-          downloadResult.localPath,
-          thumbMasterPath || thumbStandardPath,
-          processedFilename,
-          isVideo,
-          isAudio,
-          `item_${item.sequenceNumber}_${item.id}`
-        );
-      } finally {
-        releaseFFmpeg();
-      }
+      if (!usedCloudDirectFallback && downloadResult?.localPath) {
+        // Stage 3: 🛠️ معالجة الملف ودمج الغلاف
+        store.updateQueueItem(item.id, {
+          status: 'processing',
+          statusMessage: '🛠️ معالجة الملف',
+        });
+        tracker.updateProgress('⚙️ دمج الغلاف في الوسائط (FFmpeg)', 75, 'إنشاء ملف الإخراج النهائي');
 
-      // Verification before publishing
-      if (!processRes.success && !item.fileId) {
-        throw new Error(processRes.error || 'فشلت معالجة الملف ولم يتم اجتياز اختبار التحقق');
+        const releaseFFmpeg = await this.ffmpegSemaphore.acquire();
+        try {
+          processRes = await FileProcessor.processAndEmbedThumbnail(
+            downloadResult.localPath,
+            thumbMasterPath || thumbStandardPath,
+            processedFilename,
+            isVideo,
+            isAudio,
+            `item_${item.sequenceNumber}_${item.id}`
+          );
+        } finally {
+          releaseFFmpeg();
+        }
+
+        // Verification before publishing
+        if (!processRes.success && !item.fileId) {
+          throw new Error(processRes.error || 'فشلت معالجة الملف ولم يتم اجتياز اختبار التحقق');
+        }
+      } else {
+        tracker.updateProgress('⚡ تجهيز البث السحابي المباشر', 85, 'استخدام معرّف تيليجرام السحابي المباشر لضمان استمرارية النشر');
       }
 
       // Stage 7: ✅ اكتملت المعالجة بنجاح 100% -> الانتقال لوضع الانتظار التسلسلي (ready_to_publish)
@@ -890,7 +913,9 @@ class QueueWorker {
         }
 
         // Clean up temporary local files
-        FileProcessor.cleanupTempFiles([downloadResult.localPath, processRes.outputPath]);
+        FileProcessor.cleanupTempFiles(
+          [downloadResult?.localPath, processRes.outputPath].filter(Boolean) as string[]
+        );
 
         // Record in Published Channel Posts
         const post: ChannelPost = {

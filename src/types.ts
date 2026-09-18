@@ -108,6 +108,7 @@ export interface QueueItem {
   targetChannelTitle?: string;
   sourceChannelId?: string | number;
   sourceChannelTitle?: string;
+  sourceChannelUsername?: string;
   sourceMessageId?: number;
   forwardDate?: number;
   mediaGroupId?: string;
@@ -258,6 +259,7 @@ export interface BotConfig {
   turboSpeed?: TurboSpeedConfig;
   apiId?: number;
   apiHash?: string;
+  userSession?: string;
 }
 
 export interface SystemStatus {

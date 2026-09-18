@@ -6,6 +6,7 @@ export interface ForwardMetadata {
   isForwarded: boolean;
   sourceChatId?: string | number;
   sourceChannelTitle?: string;
+  sourceChannelUsername?: string;
   sourceMessageId?: number;
   forwardDate?: number;
   mediaGroupId?: string;
@@ -52,6 +53,7 @@ export function extractForwardMetadata(message: any): ForwardMetadata {
         isForwarded: true,
         sourceChatId: String(origin.chat.id),
         sourceChannelTitle: origin.chat.title || origin.chat.username,
+        sourceChannelUsername: origin.chat.username,
         sourceMessageId: typeof origin.message_id === 'number' ? origin.message_id : undefined,
         forwardDate: origin.date,
         mediaGroupId,
@@ -61,6 +63,7 @@ export function extractForwardMetadata(message: any): ForwardMetadata {
         isForwarded: true,
         sourceChatId: String(origin.sender_chat.id),
         sourceChannelTitle: origin.sender_chat.title || origin.sender_chat.username,
+        sourceChannelUsername: origin.sender_chat.username,
         sourceMessageId: typeof origin.message_id === 'number' ? origin.message_id : undefined,
         forwardDate: origin.date,
         mediaGroupId,
@@ -70,6 +73,7 @@ export function extractForwardMetadata(message: any): ForwardMetadata {
         isForwarded: true,
         sourceChatId: origin.sender_user?.id ? String(origin.sender_user.id) : origin.sender_user_name,
         sourceChannelTitle: origin.sender_user?.first_name || origin.sender_user_name,
+        sourceChannelUsername: origin.sender_user?.username,
         sourceMessageId: undefined,
         forwardDate: origin.date,
         mediaGroupId,
@@ -83,6 +87,7 @@ export function extractForwardMetadata(message: any): ForwardMetadata {
       isForwarded: true,
       sourceChatId: String(message.forward_from_chat.id),
       sourceChannelTitle: message.forward_from_chat.title || message.forward_from_chat.username,
+      sourceChannelUsername: message.forward_from_chat.username,
       sourceMessageId: typeof message.forward_from_message_id === 'number' ? message.forward_from_message_id : undefined,
       forwardDate: message.forward_date,
       mediaGroupId,
@@ -353,6 +358,7 @@ class ForwardBatchManager {
         targetChannelTitle: item.targetChannelTitle,
         sourceChannelId: item.meta.sourceChatId,
         sourceChannelTitle: item.meta.sourceChannelTitle,
+        sourceChannelUsername: item.meta.sourceChannelUsername,
         sourceMessageId: item.meta.sourceMessageId,
         forwardDate: item.meta.forwardDate,
         mediaGroupId: item.meta.mediaGroupId,
